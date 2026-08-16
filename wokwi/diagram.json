@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "author": "Krish Aaron Purmessur Moros",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-hc-sr04", "id": "ultrasonic", "top": -120, "left": 150, "attrs": {} },
+    { "type": "wokwi-lcd1602", "id": "lcd", "top": 200, "left": 100, "attrs": { "pins": "i2c" } },
+    { "type": "chip-bme280", "id": "bme", "left": -80,"top": -120, "attrs": {}},    
+    { "type": "wokwi-buzzer", "id": "buzzer", "top": 150, "left": -120, "attrs": {} },
+    { "type": "wokwi-led", "id": "led_red", "top": 20, "left": 250, "attrs": { "color": "red" } },
+    { "type": "wokwi-led", "id": "led_green", "top": 60, "left": 250, "attrs": { "color": "green" } },
+    { "type": "wokwi-led", "id": "led_blue", "top": 100, "left": 250, "attrs": { "color": "blue" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:GND.1", "ultrasonic:GND", "black", [ "v0" ] ],
+    [ "esp:5V", "ultrasonic:VCC", "red", [ "v0" ] ],
+    [ "esp:D18", "ultrasonic:TRIG", "blue", [ "v0" ] ],
+    [ "esp:D19", "ultrasonic:ECHO", "green", [ "v0" ] ],
+    [ "esp:D21", "lcd:SDA", "orange", [ "v0" ] ],
+    [ "esp:D22", "lcd:SCL", "yellow", [ "v0" ] ],
+    [ "esp:D21", "bme:SDA", "orange", [ "v0" ] ],
+    [ "esp:D22", "bme:SCL", "yellow", [ "v0" ] ],
+    [ "esp:D27", "buzzer:2", "purple", [ "v0" ] ],
+    [ "esp:GND.2", "buzzer:1", "black", [ "v0" ] ],
+    [ "esp:D25", "led_red:A", "red", [ "v0" ] ],
+    [ "esp:D26", "led_green:A", "green", [ "v0" ] ],
+    [ "esp:D33", "led_blue:A", "blue", [ "v0" ] ],
+    [ "esp:GND.3", "led_red:C", "black", [ "v0" ] ],
+    [ "esp:GND.3", "led_green:C", "black", [ "v0" ] ],
+    [ "esp:GND.3", "led_blue:C", "black", [ "v0" ] ]
+  ]
+}
