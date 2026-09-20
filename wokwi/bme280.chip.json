@@ -1,0 +1,64 @@
+{
+  "name": "bme280",
+  "author": "IoT Sabana Centro Team - Challenge #2",
+  "pins": [
+    "VCC",
+    "GND",
+    "SCK",
+    "SDI",
+    "CS",
+    "SDO"
+  ],
+  "controls": [
+    {
+      "id": "address",
+      "label": "I2C Address",
+      "type": "select",
+      "options": [
+        { "value": "118", "label": "0x76 (SDO=GND)" },
+        { "value": "119", "label": "0x77 (SDO=VCC)" }
+      ]
+    },
+    {
+      "id": "mode",
+      "label": "Mode (0=Manual, 1=Auto TimeSeries)",
+      "type": "select",
+      "options": [
+        { "value": "0", "label": "Manual (Sliders)" },
+        { "value": "1", "label": "Auto (72h Accelerated)" }
+      ]
+    },
+    {
+      "id": "accel",
+      "label": "Time Acceleration (1440=1day/min)",
+      "type": "range",
+      "min": 60,
+      "max": 14400,
+      "step": 60
+    },
+    {
+      "id": "temp",
+      "label": "Temperature (C) [Manual Mode]",
+      "type": "range",
+      "min": -10,
+      "max": 60,
+      "step": 1
+    },
+    {
+      "id": "pressure",
+      "label": "Pressure (hPa) [Manual Mode]",
+      "type": "range",
+      "min": 600,
+      "max": 1100,
+      "step": 1
+    },
+    {
+      "id": "humidity",
+      "label": "Relative Humidity (%) [Manual Mode]",
+      "type": "range",
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  ]
+}

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>SABANA CENTRO - SISTEMA IOT HIDROMETEOROLÓGICO</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0b132b;
+            color: #e0e1dd;
+            margin: 0;
+            padding: 20px;
+        }
+        .header {
+            background: #1c2541;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 6px solid #48cae4;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            margin-bottom: 25px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #caf0f8;
+            letter-spacing: 0.5px;
+        }
+        p.sub {
+            margin: 8px 0 0 0;
+            font-size: 13px;
+            color: #8da9c4;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        .card {
+            background: #1c2541;
+            border-radius: 10px;
+            padding: 22px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            border-top: 4px solid #0077b6;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .card h2 {
+            font-size: 17px;
+            margin-top: 0;
+            color: #90e0ef;
+            border-bottom: 1px solid #3a506b;
+            padding-bottom: 10px;
+        }
+        .metric-box {
+            margin: 12px 0;
+        }
+        .metric {
+            font-size: 32px;
+            font-weight: bold;
+            color: #48cae4;
+            margin: 4px 0;
+        }
+        .unit {
+            font-size: 16px;
+            color: #8da9c4;
+            font-weight: normal;
+        }
+        .label {
+            font-size: 12px;
+            color: #cbd5e1;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .topic-tag {
+            font-family: monospace;
+            font-size: 11px;
+            background: #0b132b;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: #64dfdf;
+            margin-top: 10px;
+            word-break: break-all;
+        }
+        .badge-normal {
+            background: #1b4332;
+            color: #d8f3dc;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            display: inline-block;
+        }
+        .badge-alert {
+            background: #6a040f;
+            color: #ffccd5;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            display: inline-block;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid #3a506b;
+            text-align: center;
+            font-size: 12px;
+            color: #8da9c4;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>SISTEMA DISTRIBUIDO DE MONITOREO HÍDRICO — SABANA CENTRO</h1>
+        <p class="sub">Ecosistema IoT de Borde | Broker MQTT & Dashboard Central | Universidad de La Sabana 2026</p>
+    </div>
+
+    <div class="grid">
+        <!-- Sub-estacion 1 -->
+        <div class="card">
+            <h2>1. MICROCUENCA / CAPTACIÓN</h2>
+            <div class="metric-box">
+                <div class="label">Nivel de Agua (Río / Bocatoma):</div>
+                <div class="metric">2.45 <span class="unit">m</span></div>
+            </div>
+            <div class="metric-box">
+                <div class="label">Caudal de Descarga:</div>
+                <div class="metric">18.2 <span class="unit">L/min</span></div>
+            </div>
+            <div>
+                <p>Estado Operativo: <span class="badge-normal">NORMAL (QoS 0)</span></p>
+            </div>
+            <div class="topic-tag">MQTT: sabanacentro/chia/microcuenca/data</div>
+        </div>
+
+        <!-- Sub-estacion 2 -->
+        <div class="card">
+            <h2>2. TANQUE DE ALMACENAMIENTO</h2>
+            <div class="metric-box">
+                <div class="label">Volumen Disponible:</div>
+                <div class="metric">74.2 <span class="unit">%</span></div>
+            </div>
+            <div class="metric-box">
+                <div class="label">Presión Hidrostática en Solera:</div>
+                <div class="metric">30.4 <span class="unit">kPa</span></div>
+            </div>
+            <div>
+                <p>Nivel de Reserva: <span class="badge-normal">OPERATIVO ESTABLE</span></p>
+            </div>
+            <div class="topic-tag">MQTT: sabanacentro/chia/tanque/data</div>
+        </div>
+
+        <!-- Sub-estacion 3 -->
+        <div class="card">
+            <h2>3. CLIMATOLOGÍA DE BORDE</h2>
+            <div class="metric-box">
+                <div class="label">Temperatura / Presión Barométrica:</div>
+                <div class="metric">16.8 <span class="unit">°C</span> | 745 <span class="unit">hPa</span></div>
+            </div>
+            <div class="metric-box">
+                <div class="label">Evapotranspiración Estimada (ETo):</div>
+                <div class="metric">3.8 <span class="unit">mm/día</span></div>
+            </div>
+            <div>
+                <p>Riesgo Agro-Climático: <span class="badge-normal">MODERADO</span></p>
+            </div>
+            <div class="topic-tag">MQTT: sabanacentro/chia/clima/data</div>
+        </div>
+    </div>
+
+    <div class="footer">
+        Facultad de Ingeniería — Universidad de La Sabana | Protocolo: MQTT v3.1.1 sobre TCP/IP | NAT Gateway WAN: 203.0.113.2 | Servidor Cloud: 203.0.113.1
+    </div>
+
+</body>
+</html>
