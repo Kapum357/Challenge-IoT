@@ -1,4 +1,24 @@
 // Wokwi Custom Chip: Bosch BME280 - Challenge #2
+// Módulo sensor de presión, temperatura y humedad BME280
+//
+// Especificaciones técnicas del módulo:
+//   - Voltaje de funcionamiento: 1.71 V a 3.6 V
+//   - Interfaz: I2C (0x76 / 0x77), SPI
+//   - Consumo de corriente: 3.6 µA
+//   - Dimensiones: 1.4 × 1.7 cm
+//   - Sensor de humedad:
+//       * Rango: 0 a 100 %HR
+//       * Precisión: ± 3 % HR
+//       * Resolución: 0.008 % HR
+//   - Sensor de presión:
+//       * Rango: 300 a 1100 hPa
+//       * Precisión: ± 1 hPa
+//       * Resolución: 0.18 Pa
+//   - Sensor de temperatura:
+//       * Rango: -40 a 85 °C
+//       * Precisión: ± 1 °C
+//       * Resolución: 0.1 °C
+//
 // Serie temporal acelerada: comprime 72h de datos meteorológicos de Sabana Centro
 // en N minutos de simulación (factor configurable vía atributo "accel").
 //
@@ -97,10 +117,10 @@ static void update_sensor_data(chip_state_t *chip) {
     } else {
         // Modo manual: leer valores de los sliders
         temp_c = attr_read_float(chip->temp_attr);
-        if (temp_c < -20.0f || temp_c > 85.0f) temp_c = 20.0f;
+        if (temp_c < -40.0f || temp_c > 85.0f) temp_c = 20.0f;
 
         press_hpa = attr_read_float(chip->press_attr);
-        if (press_hpa < 300.0f || press_hpa > 1200.0f) press_hpa = 1013.25f;
+        if (press_hpa < 300.0f || press_hpa > 1100.0f) press_hpa = 1013.25f;
 
         hum_pct = attr_read_float(chip->hum_attr);
         if (hum_pct < 0.0f || hum_pct > 100.0f) hum_pct = 65.0f;

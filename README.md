@@ -1,4 +1,4 @@
-# Challenge-1 & Challenge-2: Sistema IoT Integrado de Borde para el Monitoreo Hidrometeorológico y Alerta Temprana en Sabana Centro
+# Challenge: Sistema IoT Integrado de Borde para el Monitoreo Hidrometeorológico y Alerta Temprana en Sabana Centro
 
 ---
 
@@ -6,35 +6,37 @@
 Nodo IoT de procesamiento en el borde (*Edge Computing*) concebido como una solución de ultra bajo costo (**BOM optimizado de $24.00 USD**, donde el ESP32 a **$4.50 USD** se preserva rigurosamente como el componente individual más costoso del sistema) para la detección temprana de riesgo hídrico, sequía y balance hidrometeorológico en reservorios y acueductos veredales de la provincia de Sabana Centro, Cundinamarca (Latitud 4.81° N, 2,600 m.s.n.m.), en el marco de la crisis climática por el Fenómeno de El Niño.
 
 El sistema opera con **100% de autonomía in-situ (cero costos mensuales de conectividad o infraestructura cloud)** mediante una **arquitectura concurrente dual-core sobre FreeRTOS**:
-1. **Compensación termo-acústica dinámica**: Corrección del tiempo de vuelo ultrasónico (HC-SR04) en función de la temperatura y humedad ambiental leídas por el sensor **BME280** vía I2C.
+1. **Compensación termo-acústica dinámica**: Corrección del tiempo de vuelo ultrasónico (HC-SR04) en función de la temperatura y humedad ambiental leídas por el sensor **BME280** vía I2C. Modo *fail-safe* que emite centinela de error en eco inválido en lugar de asumir tanque lleno.
 2. **Cuantificación volumétrica de caudal**: Detección de pulsos de turbina Hall (YF-S201) mediante interrupciones de hardware (`IRAM_ATTR flowPulseISR`) protegidas por spinlock dual-core (`portMUX_TYPE`).
 3. **Cálculo astronómico de Evapotranspiración ($ET_0$)**: Modelo de Hargreaves-Samani parametrizado para la radiación extraterrestre ($R_a$) y latitud de Sabana Centro.
-4. **Matriz de Fusión Multisensorial de Riesgo**: Clasificación autónoma en 4 estados operativos: 0 (Normal), 1 (Estrés Moderado), 2 (Alerta Severa), 3 (Emergencia Crítica).
+4. **Matriz de Fusión Multisensorial de Riesgo con Histéresis**: Clasificación autónoma en 4 estados operativos (0: Normal, 1: Estrés Moderado, 2: Alerta Severa, 3: Emergencia Crítica) filtrados por `RiskStateMachine` (3 muestras consecutivas para escalar, 5 para des-escalar).
 5. **Buffer Circular determinístico en SRAM (`SramRingBuffer`)**: 360 registros empacados de 37 bytes (`TelemetryRecord`) sincronizados por FreeRTOS Mutex, evitando el desgaste de memoria Flash.
-6. **Visualización In-Situ Autónoma**: Display LCD 1602A (interfaz paralelo 4 bits) con carrusel de 3 pantallas multifunción (cada 3 s), LEDs tricolor y buzzer piezoeléctrico de 85 dB con **perro guardián (*watchdog*) de silenciamiento remoto**.
-7. **Servidor Web Embebido lwIP (Core 0)**: Single Page Application (SPA) en `PROGMEM` con gráficas interactivas nativas en **HTML5 Canvas** (cero dependencias CDN o librerías externas), REST APIs (`/api/data`, `/api/history`, `/api/cmd`), filtro estricto de subred `(clientIP & subnetMask) == (localIP & subnetMask)` y autenticación HTTP Basic Auth.
+6. **Visualización In-Situ Autónoma**: Display LCD 1602A (interfaz paralelo 4 bits) con página fija de alta visibilidad (IP de enlace + Estado de riesgo y buzzer con actualización diferencial anti-parpadeo), LEDs tricolor y buzzer piezoeléctrico de 85 dB con **perro guardián (*watchdog*) de silenciamiento remoto**.
+7. **Servidor Web Embebido lwIP (Core 0)**: Single Page Application (SPA) en `PROGMEM` con gráficas interactivas nativas en **HTML5 Canvas** (cero dependencias CDN o librerías externas), REST APIs (`/api/data`, `/api/history`, `/api/cmd`), filtro estricto de subred `(clientIP & subnetMask) == (localIP & subnetMask)` y control de acceso mediante formulario web, tokens de sesión en Cookie (`HttpOnly; SameSite=Strict`) y verificación SHA-256 con salt.
 
 ---
 
 ## 📁 Estructura del Repositorio
 * `src/`:
-  * `WaterMonitorCore.h`: Definición de `TelemetryRecord` (37 bytes con humedad relativa BME280), clase `SramRingBuffer` (360 muestras), filtro de subred `isSubnetAllowed` y algoritmos hidrometeorológicos.
-  * `WaterMonitorCore.cpp`: Implementación de algoritmos matemáticos y buffer circular.
-  * `esp32_water_monitor/esp32_water_monitor.ino`: Firmware principal para ESP32 DevKit v1 con FreeRTOS dual-core (Core 0: Servidor HTTP lwIP; Core 1: Adquisición, Analítica y HMI local).
-  * `test_water_monitor.cpp`: Suite de pruebas unitarias exhaustiva (verificación matemática, empaquetado de estructuras, wrap-around del ring buffer y filtros de seguridad).
+  * `WaterMonitorCore.h` y `WaterMonitorCore.cpp`: Definición y lógica matemática pura portable (sin dependencias Arduino): `TelemetryRecord` (37 bytes empacados), clase `SramRingBuffer` (360 muestras), `RiskStateMachine`, filtro de subred `isSubnetAllowed` y algoritmos hidrometeorológicos.
+  * `esp32_water_monitor/`: Código del nodo embebido para Arduino IDE / PlatformIO / Wokwi.
+    * `esp32_water_monitor.ino`: Firmware principal para ESP32 DevKit v1 con FreeRTOS dual-core (Core 0: Servidor HTTP lwIP y CLI; Core 1: Adquisición, Analítica y HMI local).
+    * `WaterMonitorCore.h` y `WaterMonitorCore.cpp`: Copia sincronizada del núcleo portable para compilación directa en el entorno Arduino. *(Nota de mantenimiento: se recomienda mantener ambas copias sincronizadas o unificar mediante symlink/ruta de inclusión en CI)*.
+  * `test_water_monitor.cpp`: Suite de pruebas unitarias exhaustiva (12 bloques temáticos, 81 aserciones cubriendo verificación matemática, empaquetado de estructuras, wrap-around del ring buffer, histéresis y filtros de seguridad).
   * `Makefile`: Automatización de compilación con `g++` (`-Wall -Wextra -pedantic`) y ejecución local de tests.
 * `wokwi/`:
   * `diagram.json`: Configuración del circuito en simulador Wokwi (ESP32 DevKit v1, HC-SR04, chip BME280 I2C, LCD 1602A 4-bit, LEDs, Buzzer, Pulsador Hall).
-  * `bme280.chip.json`: Descriptor del chip personalizado Wokwi para BME280 con controles deslizantes para dirección I2C (0x76/0x77), temperatura (-10 a 60 °C), presión (600 a 1100 hPa) y humedad relativa (0 a 100 % HR).
-  * `bme280.chip.c`: Implementación en C del transductor BME280 para la API Wokwi.
-* `../Challenge-1.wiki/`: Documentación técnica formal con 5 Registros de Decisiones de Arquitectura (ADR), Business Model Canvas, diagramas UML y normas IEEE.
+  * `bme280.chip.json`: Descriptor del chip personalizado Wokwi para BME280 con controles interactivos para dirección I2C (0x76/0x77), temperatura (-10 a 60 °C), presión (600 a 1100 hPa) y humedad relativa (0 a 100 % HR).
+  * `bme280.chip.c`: Implementación en C del transductor BME280 para la API Wokwi, incluyendo emulación horaria acelerada (`accel=1440`).
+  * `wokwi.toml`: Configuración de enlace a binarios de firmware.
+* `Challenge.wiki/`: Documentación técnica formal completa con Registros de Decisiones de Arquitectura (ADR), Business Model Canvas, diagramas UML y normas IEEE.
 
 ---
 
 ## 🚀 Cómo Empezar
 
 ### 1. Validación de Algoritmos Locales (C++ Unit Tests)
-Para compilar y ejecutar la suite completa de pruebas unitarias en Windows/Linux:
+Para compilar y ejecutar la suite completa de pruebas unitarias en Windows/Linux (81 aserciones en 12 bloques temáticos):
 ```powershell
 cd src
 mingw32-make run
@@ -51,34 +53,37 @@ g++ -std=c++17 -Wall -Wextra -pedantic WaterMonitorCore.cpp test_water_monitor.c
    * Variar el deslizador del sensor **BME280** para alterar temperatura, presión o humedad relativa (% HR).
    * Mover la distancia del sensor ultrasónico HC-SR04 para simular fluctuaciones en el nivel del agua.
    * Pulsar el botón azul (*Flow Pulse*) en GPIO 14 para inyectar pulsos de caudal volumétrico.
-   * **Observar la rotación del Carrusel LCD 1602A (cada 3 segundos)**:
-     * **Pantalla 1**: `Niv: 71% 35.5cm` | `Q: 3.8L NORMAL` (Hidráulica principal y estado).
-     * **Pantalla 2**: `Desc: 0.4 cm/h` | `T:19.8C H:68%` (Tasa de descenso, temperatura y humedad BME280).
-     * **Pantalla 3**: `ETo: 3.9 P: 746` | `WiFi:192.168.4.1` (Evapotranspiración, presión atmosférica e IP de enlace).
-   * Comprobar la respuesta óptica y acústica en los LEDs tricolor y buzzer.
+   * **Lectura del Display LCD 1602A (Página Única Fija)**:
+     * **Fila 0**: `IP:192.168.4.1` (o IP asignada en red STA de la alcaldía), permitiendo a las autoridades conocer de inmediato la URL del servidor web embebido.
+     * **Fila 1**: `R:NORMAL BUZ:OFF` (Estado de riesgo actual y condición acústica; indica `BUZ:MUT` si fue silenciado o `*TEST*` en modo de prueba manual).
+   * Comprobar la respuesta óptica y acústica en los LEDs tricolor y buzzer piezoeléctrico.
 
 ### 3. Conexión Inalámbrica Directa Punto a Punto (SoftAP + Web SPA Dashboard)
-El nodo no requiere router, cables ni conexión a internet:
+El nodo no requiere router externo ni conexión a internet para operar en campo:
 * **SSID Wi-Fi del ESP32**: `AguaSabana-Nodo` (Contraseña: `sabana2026`).
-* **Acceso desde Celular o PC**: Abrir el navegador en `http://192.168.4.1`.
+* **Acceso desde Celular o PC**: Abrir el navegador en `http://192.168.4.1` (o la IP reportada en la Fila 0 del LCD).
 * **Características del SPA Dashboard**:
   * **Gráfica Interactiva en HTML5 Canvas Puro**: Dibuja la serie temporal de nivel y humedad relativa a partir de los 360 registros en SRAM de `/api/history` sin depender de CDNs externas.
   * **Telemetría en Vivo (1 Hz vía AJAX `/api/data`)**: Nivel, porcentaje, caudal instantáneo, descenso, temperatura, humedad relativa BME280, presión y $ET_0$.
-  * **Seguridad Perimetral**: Validación de subred local `192.168.4.0/24` (403 si proviene de subred extraña) y protección de `/api/cmd` mediante HTTP Basic Auth (`admin:sabana2026`).
+  * **Seguridad Perimetral y Autenticación**:
+    * Filtro estricto de subred: únicamente se aceptan clientes pertenecientes a la subred de la interfaz activa (`192.168.4.0/24` en SoftAP o subred local autorizada en STA); peticiones de otras redes reciben `403 Forbidden`.
+    * Formulario de inicio de sesión (`/login`): autenticación con usuario `admin` y contraseña `sabana2026`, validada mediante SHA-256 con salt (`mbedtls`).
+    * Manejo de sesiones: Cookie `session=<token>` (`HttpOnly; SameSite=Strict; Path=/; Max-Age=900`) con soporte para hasta 4 sesiones activas y cierre de sesión (`/logout`).
   * **Watchdog de Silenciamiento de Alarma**: Botón para silenciar el buzzer durante 5 minutos (`silence 300`), reactivándose automáticamente si la emergencia persiste.
 
 ### 4. Consola de Servicio Embebida (UART0 @ 115200 baud)
-Comandos disponibles en el monitor serie (`SabanaNode>`):
-* `help`: Catálogo de comandos interactivos.
-* `status`: Diagnóstico completo de memoria FreeRTOS, estado BME280 y variables hidrológicas.
-* `test <0-3>`: Forzado manual de estados de riesgo (0:Normal, 1:Estrés, 2:Alerta, 3:Emergencia).
-* `auto`: Retorno al modo automático de fusión multisensorial.
-* `silence [seg]`: Silenciamiento temporal del buzzer con perro guardián.
-* `unsilence`: Reactivación inmediata del buzzer.
-* `calib <K>`: Ajuste dinámico del factor $K$ del caudalímetro Hall.
-* `scan-i2c`: Escaneo en tiempo real de direcciones en el bus I2C (0x76 / 0x77).
-* `echo-test`: Prueba diagnóstica individual del transductor ultrasónico.
-* `reboot`: Reinicio controlado del microcontrolador vía software.
+Comandos implementados en el monitor serie (`SabanaNode>`):
+* `help`: Menú interactivo de comandos disponibles.
+* `status`: Diagnóstico completo de telemetría, memoria FreeRTOS, estado del BME280 y buffer histórico en SRAM.
+* `test <0-3>`: Forzado manual de estados de riesgo (0: Normal, 1: Estrés, 2: Alerta, 3: Emergencia).
+* `auto`: Retorno al modo automático de fusión sensorial.
+* `silence [seg]`: Silenciamiento temporal del buzzer con perro guardián (valor por defecto: 300 s).
+* `unsilence`: Reactivación inmediata del buzzer físico.
+* `flow <factor>`: Ajuste dinámico del factor $K$ del caudalímetro Hall (rango válido: 0.5 a 50.0).
+* `ntp`: Diagnóstico del estado de sincronización NTP, día juliano y temperaturas extremas en 24 h.
+* `hysteresis`: Inspección de la máquina de estados de histéresis temporal (`RiskStateMachine`).
+
+*(Nota técnica: comandos de diagnóstico avanzado como escaneo I2C y calibración no volátil se encuentran planificados en el backlog del firmware para futuras iteraciones).*
 
 ---
 

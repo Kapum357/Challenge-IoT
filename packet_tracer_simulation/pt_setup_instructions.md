@@ -11,7 +11,7 @@
 | **Asignatura** | Internet de las Cosas (IoT) |
 | **Actividad** | Actividad de Refuerzo #2.3 — Conectividad en IoT |
 | **Contexto Regional** | Provincia de Sabana Centro, Cundinamarca, Colombia (Chía, Cajicá, Zipaquirá) |
-| **Archivo Oficial de Simulación** | [`RA2.3.pkt`](file:///c:/Users/USUARIO/OneDrive%20-%20Universidad%20de%20la%20Sabana/Escritorio/Projects/IoT/Challenge-1/packet_tracer_simulation/RA2.3.pkt) |
+| **Archivo Oficial de Simulación** | [`RA2.3.pkt`] |
 | **Entregables Integrados** | Documento Técnico + Guía de Configuración + Dashboard Web + Troubleshooting + Guion de Video (5 min) |
 | **Estándares Aplicados** | ISO/IEC 30141:2018 (IoT Reference Architecture), OASIS MQTT v3.1.1, IEEE 802.11 b/g/n, RFC 3022 (NAT/PAT) |
 
@@ -153,13 +153,13 @@ A fin de garantizar un diseño robusto, fácil de seguir y libre de sobrecarga d
 ### 4.3 Guía de Montaje y Verificación Rápida de `RA2.3.pkt`
 
 1. **Abrir el Archivo de Simulación**:
-   * Ejecutar Cisco Packet Tracer y abrir [`RA2.3.pkt`](file:///c:/Users/USUARIO/OneDrive%20-%20Universidad%20de%20la%20Sabana/Escritorio/Projects/IoT/Challenge-1/packet_tracer_simulation/RA2.3.pkt).
+   * Ejecutar Cisco Packet Tracer y abrir [`RA2.3.pkt`].
 2. **Verificar el Estado de los Enlaces**:
    * Comprobar que los triángulos del cable UTP entre el Gateway (`Internet`) y el Servidor (`FastEthernet0`) estén en verde.
    * Verificar que los 4 equipos inalámbricos proyecten ondas de radiofrecuencia hacia el Gateway.
 3. **Carga del Dashboard Web en el Servidor**:
    * En `Cloud_IoT_Platform` -> pestaña **Services** -> **HTTP**.
-   * Editar `index.html` y asegurar que contenga el código del Dashboard de Sabana Centro (provisto en [`dashboard_index.html`](file:///c:/Users/USUARIO/OneDrive%20-%20Universidad%20de%20la%20Sabana/Escritorio/Projects/IoT/Challenge-1/packet_tracer_simulation/dashboard_index.html)).
+   * Editar `index.html` y asegurar que contenga el código del Dashboard de Sabana Centro (provisto en [`dashboard_index.html`]).
 4. **Prueba de Concesión DHCP**:
    * En `Laptop_Observador` -> **Desktop** -> **Command Prompt**:
      ```cmd
