@@ -30,9 +30,9 @@ struct TelemetryRecord {
     float levelPercent;   // Porcentaje de llenado (0 a 100%)
     float flowLMin;       // Caudal de descarga instantáneo (L/min)
     float dropRateCmH;    // Tasa de descenso de nivel (cm/h)
-    float tempC;          // Temperatura ambiente BME280 (°C)
-    float pressureHpa;    // Presión atmosférica BME280 (hPa)
-    float humidityPct;    // Humedad relativa BME280 (% HR)
+    float tempC;          // Temperatura ambiente SHT30 (°C)
+    float pressureHpa;    // Presión no disponible con SHT30; -1.0 indica N/D
+    float humidityPct;    // Humedad relativa SHT30 (% HR)
     float etoMmDay;       // Evapotranspiración ETo Hargreaves-Samani (mm/día)
     uint8_t riskState;    // Estado de riesgo (0: NORMAL, 1: ESTRES, 2: ALERTA, 3: EMERGENCIA)
 };

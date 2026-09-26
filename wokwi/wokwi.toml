@@ -3,5 +3,6 @@ version = 1
 firmware = '../build/esp32_water_monitor.bin'
 elf = '../build/esp32_water_monitor.elf'
 
-# El chip BME280 personalizado usa mode=1 y accel=1440 en diagram.json:
-# 1 día simulado por minuto de tiempo real de Wokwi.
+# El diagrama usa los modelos Wokwi SHT30, ILI9341 y microSD:
+# la validación de colores, alimentación y escritura SD debe completarse
+# en el montaje físico de la placa TFT.

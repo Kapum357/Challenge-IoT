@@ -3,88 +3,19 @@
 
 ---
 
-## Metadatos de la Actividad
-
-| Parámetro | Detalle |
-| :--- | :--- |
-| **Institución** | Universidad de La Sabana — Facultad de Ingeniería |
-| **Asignatura** | Internet de las Cosas (IoT) |
-| **Actividad** | Actividad de Refuerzo #2.3 — Conectividad en IoT |
-| **Contexto Regional** | Provincia de Sabana Centro, Cundinamarca, Colombia (Chía, Cajicá, Zipaquirá) |
-| **Archivo Oficial de Simulación** | [`RA2.3.pkt`] |
-| **Entregables Integrados** | Documento Técnico + Guía de Configuración + Dashboard Web + Troubleshooting + Guion de Video (5 min) |
-| **Estándares Aplicados** | ISO/IEC 30141:2018 (IoT Reference Architecture), OASIS MQTT v3.1.1, IEEE 802.11 b/g/n, RFC 3022 (NAT/PAT) |
-
----
-
 ## 1. Contexto, Motivación y Extensión del Challenge 1
 
 ### 1.1 El Reto Hídrico en Sabana Centro
-La cuenca alta del río Bogotá y los sistemas de abastecimiento veredal de Sabana Centro enfrentan episodios críticos de estrés hídrico y estiaje severo exacerbados por el fenómeno de El Niño. En el **Challenge 1**, se diseñó y validó una estación hidrometeorológica de borde mononodal autónoma basada en ESP32 DevKit v1, orientada a medir nivel de agua, caudal y variables atmosféricas in-situ con una interfaz de usuario local (display LCD 1602A y SPA Web en WLAN local).
+La cuenca alta del río Bogotá y los sistemas de abastecimiento veredal de Sabana Centro enfrentan episodios críticos de estrés hídrico y estiaje severo exacerbados por el fenómeno de El Niño. En el **Challenge 1**, se diseñó y validó una estación hidrometeorológica de borde mononodal autónoma basada en ESP32 DevKit v1, orientada a medir nivel de agua, caudal y variables atmosféricas in-situ con una interfaz de usuario local (display TFT ILI9341 y SPA Web en WLAN local).
 
 ### 1.2 Extensión a una Red Distribuida de Nodos (WSN)
 Para garantizar una toma de decisiones oportuna por parte de los Comités Municipales de Gestión del Riesgo (CMGRD) y las Juntas de Acción Comunal (JAC), una estación aislada resulta insuficiente. La **Actividad de Refuerzo #2.3** trasciende el diseño mononodal y lo extiende a una **Red Inalámbrica de Sensores (*Wireless Sensor Network - WSN*) distribuida**, donde múltiples nodos replican la sensórica en puntos críticos del acueducto veredal (microcuenca, tanque de almacenamiento y estación meteorológica), canalizando los datos a través de un gateway de borde hacia un servidor central en la nube mediante **MQTT**.
 
 ---
 
-## 2. Ecosistema IoT Completo de Extremo a Extremo (ISO/IEC 30141:2018)
+## 2. Justificación de Tecnologías y Protocolos de Red
 
-El diseño responde de manera estricta a la arquitectura de referencia internacional de IoT (**ISO/IEC 30141:2018**), integrando explícitamente sus cinco capas funcionales:
-
-```mermaid
-graph TB
-    subgraph CAPA1["1. Capa de Dispositivos / Percepción (Nodos WSN)"]
-        N1["Sub-estación 1: Microcuenca / Captación<br/>• Sensor Nivel Ultrasónico (JSN-SR04T)<br/>• Sensor Caudal Hall (YF-S201)<br/>• MCU Wi-Fi 802.11 b/g/n"]
-        N2["Sub-estación 2: Tanque de Almacenamiento<br/>• Sensor Nivel Ultrasónico (JSN-SR04T)<br/>• Sensor Presión Hidrostática (BME280)<br/>• MCU Wi-Fi 802.11 b/g/n"]
-        N3["Sub-estación 3: Climatología de Borde<br/>• Sensor Temperatura / Presión / Humedad (BME280)<br/>• Sensor Radiación / Iluminancia (BH1750)<br/>• MCU Wi-Fi 802.11 b/g/n"]
-    end
-
-    subgraph CAPA2["2. Capa de Acceso / Conectividad Local (WSN)"]
-        WIFI["Canal Radiofrecuencia 2.4 GHz (802.11 b/g/n)<br/>SSID: SabanaCentro_IoT<br/>Cobertura Local (Cero Cables)"]
-    end
-
-    subgraph CAPA3["3. Capa de Borde / Gateway"]
-        GW["Home Gateway IoT de Borde<br/>• Punto de Acceso (AP) Wi-Fi Integrado<br/>• Servidor DHCP de Campo (192.168.25.0/24)<br/>• Pasarela de Enrutamiento NAT/PAT<br/>• Interfaz WAN Pública (203.0.113.2/30)"]
-    end
-
-    subgraph CAPA4["4. Capa de Transporte WAN / Internet"]
-        WAN["Enlace Punto a Punto WAN (1 Cable UTP)<br/>Backbone ISP / Segmento Público 203.0.113.0/30"]
-    end
-
-    subgraph CAPA5["5. Capa de Plataforma IoT & Usuario Final"]
-        SRV["Servidor IoT Cloud (203.0.113.1)<br/>• Broker MQTT (TCP 1883)<br/>• Servidor Web HTTP Dashboard (TCP 80)<br/>• Motor de Registro y Almacenamiento"]
-        OBS["Usuario Final / Observador<br/>• Laptop / Smartphone CMGRD & JAC<br/>• Consulta Web HTTP en Tiempo Real"]
-    end
-
-    N1 -.->|Wi-Fi 802.11| WIFI
-    N2 -.->|Wi-Fi 802.11| WIFI
-    N3 -.->|Wi-Fi 802.11| WIFI
-
-    WIFI --> GW
-    GW ===|1 Cable UTP FastEthernet| WAN
-    WAN ===|Uplink Directo| SRV
-
-    OBS -.->|Wi-Fi Local / Tráfico HTTP| GW
-    GW -.->|NAT/PAT Transversal| SRV
-
-    classDef dev fill:#E1F5FE,stroke:#0288D1,stroke-width:2px,color:#01579B;
-    classDef wlan fill:#FFF9C4,stroke:#FBC02D,stroke-width:2px,color:#F57F17;
-    classDef gw fill:#E8F5E9,stroke:#2E7D32,stroke-width:3px,color:#1B5E20;
-    classDef wan fill:#ECEFF1,stroke:#607D8B,stroke-width:2px,color:#263238;
-    classDef srv fill:#EDE7F6,stroke:#512DA8,stroke-width:2px,color:#311B92;
-
-    class N1,N2,N3 dev;
-    class WIFI wlan;
-    class GW gw;
-    class WAN wan;
-    class SRV,OBS srv;
-```
-
----
-
-## 3. Justificación de Tecnologías y Protocolos de Red
-
-### 3.1 Comparativa de Tecnologías de Red (PAN vs. WLAN vs. LPWAN)
+### 2.1 Comparativa de Tecnologías de Red (PAN vs. WLAN vs. LPWAN)
 
 | Criterio | WPAN (IEEE 802.15.4 / Zigbee) | WLAN (Wi-Fi 802.11 b/g/n) | LPWAN (LoRaWAN / NB-IoT) |
 | :--- | :--- | :--- | :--- |
@@ -98,9 +29,7 @@ graph TB
 > **Decisión de Ingeniería**:
 > Para el radio de cobertura del acueducto veredal (la caseta de bombeo, el tanque de almacenamiento y la microcuenca adyacente se ubican a menos de 100 metros del concentrador), **Wi-Fi 802.11 b/g/n a 2.4 GHz** es la tecnología óptima. Ofrece despliegue de campo con cero cables, costo marginal de hardware nulo y compatibilidad directa con el gateway simulado.
 
----
-
-### 3.2 Protocolo de Capa de Aplicación: Adopción de MQTT
+### 2.2 Protocolo de Capa de Aplicación: Adopción de MQTT
 
 1. **Eficiencia de Ancho de Banda y Batería**: La cabecera fija de MQTT es de tan solo **2 bytes**. En comparación con peticiones HTTP repetitivas, reduce el volumen de datos en más de un 90%, minimizando el tiempo de radio encendido (*duty cycle*) de los nodos en campo.
 2. **Arquitectura Publicador/Suscriptor Desacoplada**: Los nodos sensores envían sus datos al Broker sin requerir conocimiento de la dirección IP de los clientes finales ni depender de que el dashboard esté activo.
@@ -109,154 +38,188 @@ graph TB
    - **QoS 1 (*At least once*)**: Para eventos de alerta crítica (desabastecimiento inminente, desbordamiento o falla de flujo), asegurando confirmación obligatoria del Broker mediante `PUBACK`.
 4. **Last Will and Testament (LWT)**: Permite notificar a los operadores si un nodo de campo se desconecta inesperadamente por corte de energía o daño físico, publicando un mensaje póstumo `{"status": "OFFLINE"}`.
 
----
+### 2.3 Esquema de Tópicos MQTT y Estructura de Payloads JSON
 
-### 3.3 Esquema de Tópicos MQTT y Estructura de Payloads JSON
+Para optimizar el tráfico y seguir la premisa de **mínima sobrecarga**, se adopta un **esquema jerárquico estructurado por municipio/estación**, consolidando todas las variables en un objeto JSON compacto:
 
-Para optimizar el tráfico y seguir la premisa de **mínima sobrecarga**, se adopta un **único tópico agrupado por sub-estación**, consolidando todas las variables en un objeto JSON compacto con marca temporal UNIX:
-
-
-| Sub-estación | Tópico MQTT | Frecuencia / QoS | Payload JSON de Ejemplo |
+| Estación / Nodo | Tópico MQTT | Frecuencia / QoS | Payload JSON de Ejemplo |
 | :--- | :--- | :--- | :--- |
-| **Microcuenca** | `sabanacentro/chia/microcuenca/data` | 30 s / QoS 0 | `{"ts":1773446400,"level_m":2.45,"flow_lmin":18.2,"status":"NORMAL"}` |
-| **Tanque** | `sabanacentro/chia/tanque/data` | 30 s / QoS 0 | `{"ts":1773446400,"vol_pct":74.2,"level_m":3.10,"press_kpa":30.41}` |
-| **Climatología** | `sabanacentro/chia/clima/data` | 60 s / QoS 0 | `{"ts":1773446400,"temp_c":16.8,"press_hpa":745.2,"lux":48500,"eto_mm":3.8}` |
-| **Canal de Alertas** | `sabanacentro/chia/sistema/alerta` | Evento / QoS 1 | `{"ts":1773446400,"node":"tanque","code":"ALERTA_SEVERA","val":18.5}` |
+| **Nodo Chía (Bocatoma Río Frío)** | `sabanacentro/chia/data` | 30 s / QoS 0 | `{"node":"Nodo_Chia","level_m":2.45,"flow_lmin":18.2,"status":"NORMAL"}` |
+| **Nodo Cajicá (Reservorio Canelón)** | `sabanacentro/cajica/data` | 30 s / QoS 0 | `{"node":"Nodo_Cajica","level_m":3.10,"vol_pct":74.2,"flow_lmin":12.5}` |
+| **Nodo Zipaquirá (Agro-Climatología)** | `sabanacentro/zipaquira/data` | 60 s / QoS 0 | `{"node":"Nodo_Zipaquira","temp_c":14.8,"press_hpa":748.0,"hr_pct":71,"eto_mm":3.6}` |
+| **Canal Unificado de Alertas** | `sabanacentro/+/alerta` | Evento / QoS 1 | `{"ts":1773446400,"node":"Nodo_Chia","code":"ESTIAJE_CRITICO","val":0.95}` |
 
 ---
 
-## 4. Implementación y Validación en Cisco Packet Tracer (`RA2.3.pkt`)
+## 3. Implementación y Validación en Cisco Packet Tracer (`RA2.3.pkt`)
 
-### 4.1 Filosofía de Simulación: Máxima Simplicidad Física (1 Solo Cable)
+### 3.1 Arquitectura de Simulación y Despliegue Físico
 
-A fin de garantizar un diseño robusto, fácil de seguir y libre de sobrecarga de componentes:
-- **Red de Sensores (WSN)**: **0 cables físicos**. Los 3 nodos sensores y la laptop del observador operan exclusivamente por radiofrecuencia Wi-Fi.
-- **Enlace de Transporte WAN**: **1 único cable físico directo UTP** que interconecta el puerto `Internet` del Home Gateway con el puerto `FastEthernet0` del Servidor Cloud.
-- **Gateway Consolidado**: Se utiliza el dispositivo `Home Gateway`, el cual unifica en una sola caja física el Punto de Acceso (AP), el Servidor DHCP local, el Enrutador y la pasarela de traducción de direcciones de red (NAT/PAT).
+Para lograr una validación reproducible y realista del ecosistema IoT:
+- **Red de Sensores de Campo (LAN Inalámbrica)**: **Cero cables en campo**. Los 3 nodos sensores (`Nodo_Chia`, `Nodo_Cajica`, `Nodo_Zipaquira`) se asocian por radiofrecuencia Wi-Fi 2.4 GHz al SSID `SabanaCentro_IoT` proyectado por el gateway.
+- **Gateway de Borde Consolidado (`GW_SabanaCentro`)**: Dispositivo `Home Gateway` (modelo `DLC-100`) que actúa como Punto de Acceso (AP) 802.11 b/g/n en su interfaz LAN (`192.168.25.1/24`) y como router de frontera con **traducción de direcciones NAT/PAT** en su puerto WAN `Internet` (`203.0.113.2/24`).
+- **Enlace de Transporte WAN a Switch de Nube**: Un cable UTP directo (*Copper Straight-Through*) interconecta el puerto `Internet` del gateway con el puerto `FastEthernet0/1` del switch `SW_Nube` (Cisco Catalyst 2960).
+- **Segmento Cloud / Plataforma IoT (Subred WAN `203.0.113.0/24`)**:
+  - `Broker_MQTT` (Laptop-PT, IP `203.0.113.10`): Ejecuta el Broker MQTT v3.1.1 (puerto TCP 1883) instalado desde el *User Apps Manager*.
+  - `Servidor_Web` (Server-PT, IP `203.0.113.20`): Aloja el Dashboard HTTP centralizado (puerto TCP 80) en su archivo `index.html`.
+  - `Laptop_Observador` (Laptop-PT, IP `203.0.113.30`): Terminal del operador (JAC / CMGRD) conectada al switch, con navegador web y app cliente MQTT suscriptora.
 
----
+### 3.2 Matriz Integral de Direccionamiento IP y Servicios
 
-### 4.2 Matriz Integral de Direccionamiento IP y Servicios
-
-| Dispositivo | Interfaz | Modo | Dirección IP | Máscara | Gateway por Defecto | Servicios Activos |
+| Dispositivo | Interfaz | Modo | Dirección IP | Máscara | Gateway por Defecto | Servicios / Rol |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **HomeGateway_SabanaCentro** | `Wireless` | Estática | `192.168.25.1` | `255.255.255.0` | N/A | SSID: `SabanaCentro_IoT`, DHCP Server ON (.100 - .150) |
-| **HomeGateway_SabanaCentro** | `Internet` | Estática | `203.0.113.2` | `255.255.255.252` | `203.0.113.1` | NAT/PAT Dinámico Habilitado |
-| **Cloud_IoT_Platform** | `FastEthernet0`| Estática | `203.0.113.1` | `255.255.255.252` | N/A | Broker MQTT (1883), HTTP Web (80), IoT Server ON |
-| **Nodo_Microcuenca** | `Wireless0` | DHCP | `192.168.25.100` | `255.255.255.0` | `192.168.25.1` | Cliente Publicador MQTT |
-| **Nodo_Tanque** | `Wireless0` | DHCP | `192.168.25.101` | `255.255.255.0` | `192.168.25.1` | Cliente Publicador MQTT |
-| **Nodo_Meteorologico** | `Wireless0` | DHCP | `192.168.25.102` | `255.255.255.0` | `192.168.25.1` | Cliente Publicador MQTT |
-| **Laptop_Observador** | `Wireless0` | DHCP | `192.168.25.103` | `255.255.255.0` | `192.168.25.1` | Navegador Web (Dashboard HTTP `203.0.113.1`) |
+| **GW_SabanaCentro** | `Wireless` | Estática | `192.168.25.1` | `255.255.255.0` | N/A | SSID: `SabanaCentro_IoT`, WPA2-PSK AES |
+| **GW_SabanaCentro** | `Internet` | Estática | `203.0.113.2` | `255.255.255.0` | `203.0.113.1` | NAT/PAT Dinámico Habilitado hacia WAN |
+| **SW_Nube** | `Vlan1` | N/A | Sin IP / Capa 2 | `255.255.255.0` | `203.0.113.1` | Switch 2960 de interconexión WAN |
+| **Broker_MQTT** | `FastEthernet0` | Estática | `203.0.113.10` | `255.255.255.0` | `203.0.113.1` | Broker MQTT v3.1.1 (TCP 1883) |
+| **Servidor_Web** | `FastEthernet0` | Estática | `203.0.113.20` | `255.255.255.0` | `203.0.113.1` | Servidor HTTP Dashboard (TCP 80) |
+| **Laptop_Observador** | `FastEthernet0` | Estática | `203.0.113.30` | `255.255.255.0` | `203.0.113.1` | Navegador HTTP + Suscriptor MQTT Client |
+| **Nodo_Chia** | `Wireless0` | Estática | `192.168.25.101` | `255.255.255.0` | `192.168.25.1` | Publicador MQTT (`sabanacentro/chia/data`) |
+| **Nodo_Cajica** | `Wireless0` | Estática | `192.168.25.102` | `255.255.255.0` | `192.168.25.1` | Publicador MQTT (`sabanacentro/cajica/data`) |
+| **Nodo_Zipaquira** | `Wireless0` | Estática | `192.168.25.103` | `255.255.255.0` | `192.168.25.1` | Publicador MQTT (`sabanacentro/zipaquira/data`) |
 
----
+### 3.3 Guía de Montaje y Verificación Paso a Paso de `RA2.3.pkt`
 
-### 4.3 Guía de Montaje y Verificación Rápida de `RA2.3.pkt`
-
-1. **Abrir el Archivo de Simulación**:
-   * Ejecutar Cisco Packet Tracer y abrir [`RA2.3.pkt`].
-2. **Verificar el Estado de los Enlaces**:
-   * Comprobar que los triángulos del cable UTP entre el Gateway (`Internet`) y el Servidor (`FastEthernet0`) estén en verde.
-   * Verificar que los 4 equipos inalámbricos proyecten ondas de radiofrecuencia hacia el Gateway.
-3. **Carga del Dashboard Web en el Servidor**:
-   * En `Cloud_IoT_Platform` -> pestaña **Services** -> **HTTP**.
-   * Editar `index.html` y asegurar que contenga el código del Dashboard de Sabana Centro (provisto en [`dashboard_index.html`]).
-4. **Prueba de Concesión DHCP**:
-   * En `Laptop_Observador` -> **Desktop** -> **Command Prompt**:
+1. **Apertura de la Topología**:
+   * Abrir Cisco Packet Tracer y cargar [`RA2.3.pkt`].
+2. **Verificación del Cableado Físico y Estado de Enlaces**:
+   * Confirmar que el cable directo UTP conecte el puerto **Internet** de `GW_SabanaCentro` al puerto `FastEthernet0/1` de `SW_Nube`.
+   * Verificar que `Broker_MQTT` (Fa0/2), `Servidor_Web` (Fa0/3) y `Laptop_Observador` (Fa0/4) tengan enlaces verdes activos con `SW_Nube`.
+   * Confirmar que los tres nodos sensores (`Nodo_Chia`, `Nodo_Cajica`, `Nodo_Zipaquira`) muestren líneas punteadas de asociación inalámbrica con `GW_SabanaCentro`.
+3. **Despliegue del Dashboard Web en el Servidor**:
+   * En `Servidor_Web` -> pestaña **Services** -> **HTTP**.
+   * Verificar que el servicio HTTP esté en **ON** y que el archivo `index.html` contenga el código del Dashboard de Sabana Centro provisto en [`dashboard_index.html`].
+4. **Arranque del Broker MQTT**:
+   * En `Broker_MQTT` -> pestaña **Desktop** -> **User Apps Manager** (o directamente el icono **MQTT Broker**).
+   * Confirmar que el broker esté activo escuchando en el puerto estándar 1883.
+5. **Verificación de Conectividad Capa 3 (Pruebas de Ping)**:
+   * **Prueba 5.1 (LAN de Nodos al Gateway)**: Desde el Command Prompt de `Nodo_Chia`:
      ```cmd
-     ipconfig
+     ping 192.168.25.1
      ```
-   * Confirmar la asignación de la dirección `192.168.25.103` con puerta de enlace `192.168.25.1`.
-5. **Prueba de Conectividad Capa 3 (Ping a través de NAT)**:
-   * Desde la consola de la Laptop:
+     *Resultado*: 4/4 paquetes recibidos, confirmando enlace Wi-Fi local y capa 3 LAN.
+   * **Prueba 5.2 (Nodo atravesando NAT hacia el Broker Cloud)**: Desde el Command Prompt de `Nodo_Chia`:
      ```cmd
-     ping 203.0.113.1
+     ping 203.0.113.10
      ```
-   * *Resultado esperado*: 4 paquetes recibidos, 0% de pérdida ($RTT < 1\text{ ms}$).
-6. **Validación del Dashboard Web**:
+     *Resultado*: 4/4 paquetes recibidos (0% de pérdida), confirmando que el gateway traduce y enruta tráfico LAN $\rightarrow$ WAN vía NAT/PAT. Repetir desde `Nodo_Cajica` y `Nodo_Zipaquira`.
+   * **Prueba 5.3 (Interconexión Cloud)**: Desde `Laptop_Observador` en Command Prompt:
+     ```cmd
+     ping 203.0.113.10
+     ping 203.0.113.20
+     ```
+     *Resultado*: Respuestas exitosas con $RTT < 1\text{ ms}$, validando la subred WAN `203.0.113.0/24`.
+   * **Prueba 5.4 (Aislamiento de Seguridad WAN $\rightarrow$ LAN)**: Desde `Laptop_Observador` hacia un nodo interno:
+     ```cmd
+     ping 192.168.25.101
+     ```
+     *Resultado esperado*: **Request timed out (100% pérdida)**. Demuestra formalmente que el gateway oculta la topología privada de campo y bloquea conexiones entrantes no solicitadas desde Internet.
+6. **Publicación y Suscripción MQTT en Vivo**:
+   * En `Laptop_Observador` -> **Desktop** -> **MQTT Client**:
+     * Broker Address: `203.0.113.10` -> Clic en **Connect**.
+     * Pestaña **Subscribe**: Ingresar comodín `sabanacentro/#` (o `sabanacentro/+/data`) -> Clic en **Subscribe**.
+   * En cada nodo sensor (`Nodo_Chia`, `Nodo_Cajica`, `Nodo_Zipaquira`) -> **Desktop** -> **MQTT Client**:
+     * Broker Address: `203.0.113.10` -> Clic en **Connect**.
+     * Ingresar el tópico municipal correspondiente (`sabanacentro/chia/data`, etc.), el payload JSON y QoS 0 -> Clic en **Publish**.
+   * *Resultado en Observador*: Los mensajes de telemetría de los 3 municipios se reciben en tiempo real en la consola del cliente MQTT de la laptop.
+7. **Acceso al Dashboard HTTP Centralizado**:
    * En `Laptop_Observador` -> **Desktop** -> **Web Browser**.
-   * Escribir URL: `http://203.0.113.1` y presionar Enter.
-   * *Resultado esperado*: Despliegue visual del panel analítico oscuro con las lecturas en tiempo real de Microcuenca (2.45 m), Tanque (74.2%) y Clima (3.8 mm/día).
-7. **Inspección en Modo Simulación (*Simulation Mode*)**:
+   * URL: `http://203.0.113.20` -> Presionar Enter.
+   * *Resultado*: Despliegue visual del panel analítico oscuro con las 3 tarjetas de las subestaciones de Chía, Cajicá y Zipaquirá.
+8. **Inspección en Modo Simulación (*Simulation Mode*)**:
    * Cambiar a modo **Simulation**, filtrar eventos por `ICMP`, `HTTP` y `TCP`.
-   * Enviar una petición web o ping y avanzar paso a paso (*Capture/Forward*).
-   * Evidenciar en la PDU cómo la dirección IP origen cambia de `192.168.25.103` a `203.0.113.2` al atravesar la interfaz WAN del Home Gateway, confirmando la traducción dinámica PAT.
+   * Lanzar una solicitud web o ping desde un nodo hacia la nube y avanzar paso a paso (*Capture/Forward*).
+   * Inspeccionar la PDU en el Gateway: evidenciar cómo la dirección IP origen cambia de `192.168.25.101` a la IP WAN pública `203.0.113.2`, validando el mecanismo PAT (Port Address Translation) en la interfaz de salida.
+
+### 3.4 Troubleshooting: Retos Enfrentados y Soluciones de Ingeniería
+
+Durante la implementación y validación experimental en Cisco Packet Tracer se presentaron y resolvieron cinco retos de ingeniería de red y de software:
+
+#### Reto 1: Ausencia de Servidor DHCP Configurable en Gateway `DLC-100`
+* **Síntoma**: Los nodos sensores SBC-PT (`Nodo_Chia`, `Nodo_Cajica`, `Nodo_Zipaquira`) se asociaban físicamente por radiofrecuencia al SSID `SabanaCentro_IoT`, pero reportaban direcciones IP vacías o del rango de autoconfiguración APIPA (`169.254.x.x/16`), provocando la desconexión total de capa 3.
+* **Diagnóstico de Causa Raíz**: El dispositivo `Home Gateway` (modelo genérico `DLC-100`) en Packet Tracer cuenta con un microcódigo simplificado cuya pestaña **GUI** está restringida al servidor HTTP propio. Adicionalmente, en **Config $\rightarrow$ LAN** únicamente expone campos estáticos para IPv4 y máscara, sin daemon DHCP activo ni configurable para clientes de campo.
+* **Solución de Ingeniería**: Migración a un esquema de **Direccionamiento IP Estático Determinístico** en cada nodo sensor (`192.168.25.101/24`, `.102/24` y `.103/24` con Gateway `192.168.25.1`). Esto garantiza predictibilidad absoluta en la red, elimina colisiones de asignación dinámica y suprime la sobrecarga temporal de negociación DHCP en cada ciclo de inicio.
+
+#### Reto 2: Incompatibilidad de Máscara de Subred WAN (`/30` vs `/24`)
+* **Síntoma**: Tiempo de espera agotado (*Request timed out*, 100% de pérdida) en todos los pings emitidos desde los nodos de campo hacia el Broker (`203.0.113.10`) y hacia el Servidor Web (`203.0.113.20`).
+* **Diagnóstico de Causa Raíz**: La propuesta teórica inicial consideró un enlace WAN punto a punto `/30` (`255.255.255.252`) en el puerto Internet del gateway (`203.0.113.2`). Con dicha máscara, el único host válido en la subred era `203.0.113.1`. En consecuencia, los paquetes dirigidos a las direcciones `.10` y `.20` eran catalogados como fuera de subred y descartados en el gateway por ausencia de ruta.
+* **Solución de Ingeniería**: Reconfiguración de la interfaz Internet del gateway y de los hosts de la nube a máscara `/24` (`255.255.255.0`). Esto permitió integrar el switch `SW_Nube` y alojar simultáneamente el Broker, el Servidor Web y la Laptop Observadora en un segmento WAN coherente y accesible.
+
+#### Reto 3: Selección y Cableado del Puerto Físico en el Gateway
+* **Síntoma**: Imposibilidad de enrutamiento o aislamiento nulo entre la red de campo y los servidores públicos.
+* **Diagnóstico de Causa Raíz**: El chasis del gateway posee cuatro puertos Ethernet LAN y un puerto independiente etiquetado **Internet**. Conectar el switch de nube a uno de los puertos Ethernet sitúa los servidores en el dominio de difusión de campo, anulando el firewall de borde y la traducción NAT/PAT.
+* **Solución de Ingeniería**: Cableado estricto con cable de cobre directo (*Copper Straight-Through*) desde el puerto exclusivo **Internet** del gateway hacia el puerto `FastEthernet0/1` del switch `SW_Nube`, garantizando la frontera de seguridad perimetral requerida por RFC 3022.
+
+#### Reto 4: Limitación de Puertos Ethernet en Placa SBC-PT para el Broker
+* **Síntoma**: Al intentar conectar una placa SBC-PT al switch de la nube para alojar el broker, el menú desplegable solo mostraba pines de E/S analógicos y digitales (D0–D9, USB0–1), sin tarjeta de red cableada.
+* **Diagnóstico de Causa Raíz**: La placa SBC-PT estándar en el simulador está configurada por omisión como interfaz física de sensores de bajo nivel y carece de puerto RJ-45 FastEthernet en su chasis frontal.
+* **Solución de Ingeniería**: Empleo de un equipo `Laptop-PT` dedicado (`Broker_MQTT`) con puerto `FastEthernet0` nativo. En este host se instaló y ejecutó el servicio `MQTT Broker` a través del módulo *User Apps Manager*, garantizando conectividad física directa a 100 Mbps con el switch.
+
+#### Reto 5: Desacoplamiento de Flujos de Datos Web y MQTT en el Simulador
+* **Síntoma**: El servidor HTTP de Packet Tracer no soporta de forma nativa la recepción de publicaciones MQTT ni su conversión a WebSockets para visualización HTML dinámica.
+* **Solución de Ingeniería**: Separación modular de roles en la plataforma:
+  1. **Capa de Telemetría Dinámica**: Demostrada en tiempo real mediante la app nativa `MQTT Client` en la `Laptop_Observador`, suscrita al canal `sabanacentro/#` sobre TCP 1883.
+  2. **Capa de Visualización Institucional**: Desplegada por el `Servidor_Web` en el puerto TCP 80 (`http://203.0.113.20`), sirviendo el dashboard centralizado de Sabana Centro como referencia del panel de control para operadores de acueducto.
 
 ---
 
-### 4.4 Troubleshooting: Retos Enfrentados y Soluciones de Ingeniería (Hay que hacerlo)
+## 4. Guion Técnico de Grabación para la Presentación en Video (5 Minutos)
 
+Estructura cronometrada al segundo para una presentación en pareja con roles balanceados y soporte de pantalla en Packet Tracer:
 
----
-
-## 5. Guion Técnico de Grabación para la Presentación en Video (5 Minutos)
-
-Estructura cronometrada al segundo para una presentación en pareja con roles balanceados:
-### Minuto a Minuto Detallado
-
+### Tefi
 #### [0:00 - 0:45] Bloque 1: Introducción y Contexto Regional
-* **Responsable**: Estudiante 1.
-* **Apoyo en Pantalla**: Portada institucional (UniSabana, IoT), título del proyecto y mapa hidrográfico de Sabana Centro resaltando Chía, Cajicá y Zipaquirá.
+* **Apoyo en Pantalla**: Portada institucional (Universidad de La Sabana, IoT), título de la Actividad RA2.3 y mapa hidrográfico de Sabana Centro señalando Chía, Cajicá y Zipaquirá.
 * **Diálogo**:
-  > *"Cordial saludo. Bienvenidos a la sustentación de la Actividad de Refuerzo número 2.3 sobre Conectividad en IoT.*
-  > *En el Challenge 1 desarrollamos una estación mononodal para responder al estrés hídrico generado por el fenómeno de El Niño en Sabana Centro. Sin embargo, una gestión efectiva del recurso hídrico requiere monitoreo distribuido.*
-  > *En esta actividad extendemos la solución a una Red Inalámbrica de Sensores (WSN) que enlaza múltiples puntos de captación, almacenamiento y climatología, integrando MQTT, un gateway de borde y una plataforma cloud para brindar visibilidad de extremo a extremo."*
+  > *"Cordial saludo. Presentamos la sustentación técnica de la Actividad de Refuerzo 2.3 sobre Conectividad en IoT.*
+  > *En el Challenge 1 diseñamos una estación mononodal de borde para mitigar el estrés hídrico por el fenómeno de El Niño en acueductos veredales de Sabana Centro. Sin embargo, la gestión integral del recurso hídrico requiere monitoreo coordinado a lo largo de la cuenca.*
+  > *En esta actividad extendemos la arquitectura a una Red Inalámbrica de Sensores distribuida que comunica estaciones en Chía, Cajicá y Zipaquirá con un gateway de borde y una infraestructura cloud centralizada mediante el protocolo ligero MQTT."*
 
-#### [0:45 - 01:45] Bloque 2: Ecosistema IoT y Justificación de MQTT
-* **Responsable**: Estudiante 1.
-* **Apoyo en Pantalla**: Diagrama del Ecosistema en 5 capas (ISO/IEC 30141) y gráfica de sobrecarga de cabeceras (HTTP vs MQTT).
+#### [0:45 - 01:45] Bloque 2: Ecosistema IoT (ISO/IEC 30141) y Justificación de MQTT
+* **Apoyo en Pantalla**: Diagrama de arquitectura en 5 capas y tabla comparativa de protocolos (Wi-Fi vs LPWAN / MQTT vs HTTP).
 * **Diálogo**:
-  > *"Nuestro diseño implementa formalmente las 5 capas del estándar ISO/IEC 30141. En campo distribuimos 3 sub-estaciones: Microcuenca, Tanque de Almacenamiento y Climatología de Borde, comunicadas vía radiofrecuencia Wi-Fi 802.11 b/g/n.*
-  > *Seleccionamos MQTT como protocolo de aplicación por su patrón Publicador/Suscriptor y su mínima cabecera fija de 2 bytes, la cual reduce en más de un 90% el consumo de ancho de banda y batería frente a HTTP.*
-  > *Diseñamos una arquitectura de tópicos agrupados en JSON por sub-estación bajo la ruta `sabanacentro/chia/{subestacion}/data`, asignando QoS 0 para telemetría de rutina y QoS 1 para alertas críticas de estiaje."*
+  > *"Nuestra arquitectura implementa con rigor las 5 capas del estándar ISO/IEC 30141.*
+  > *En la capa de percepción desplegamos 3 nodos de campo: Bocatoma Río Frío en Chía, Reservorio Canelón en Cajicá y Estación Climatológica en Zipaquirá, comunicados mediante Wi-Fi 802.11 b/g/n a 2.4 GHz, aprovechando el radio integrado del ESP32 con cero costo adicional de transceptores.*
+  > *Para la capa de aplicación adoptamos MQTT v3.1.1. Su cabecera fija de apenas 2 bytes y su modelo publicador/suscriptor desacoplado reducen el tráfico en más del 90% frente a peticiones HTTP periódicas.*
+  > *Definimos una jerarquía de tópicos optimizada por municipio bajo la ruta `sabanacentro/{municipio}/data` con calidad de servicio QoS 0 para telemetría continua y QoS 1 para alertas críticas de estiaje."*
 
-#### [01:45 - 02:30] Bloque 3: Topología de Red y Simplicidad Física
-* **Responsable**: Estudiante 1 dando paso a Estudiante 2.
-* **Apoyo en Pantalla**: Ventana de Cisco Packet Tracer con el archivo `RA2.3.pkt` cargado, señalando con el cursor los nodos inalámbricos, el gateway y el único cable WAN.
+### Miguelon
+#### [01:45 - 02:30] Bloque 3: Topología de Red y Arquitectura en Packet Tracer
+* **Apoyo en Pantalla**: Ventana de Cisco Packet Tracer con `RA2.3.pkt`, señalando los nodos inalámbricos, el gateway DLC-100, el switch Cisco 2960 y los tres servidores de la nube.
 * **Diálogo**:
-  > *"Para la validación en Cisco Packet Tracer adoptamos un principio estricto de ingeniería: máxima simplicidad física.*
-  > *Unificamos el borde de red en un Home Gateway IoT, el cual actúa simultáneamente como Punto de Acceso Wi-Fi, servidor DHCP local en el segmento `192.168.25.0/24` y pasarela de traducción NAT.*
-  > *Esto elimina todos los cables en la red de sensores y requiere exactamente un único cable físico UTP en toda la maqueta: el enlace WAN hacia el servidor cloud en la red `203.0.113.0/30`. Le doy paso a mi compañero para la demostración en vivo."*
+  > *"En Cisco Packet Tracer modelamos la topología con alta fidelidad técnica:*
+  > *En campo, los tres nodos operan en una red de área local inalámbrica en el segmento `192.168.25.0/24` asociada al SSID 'SabanaCentro_IoT'.*
+  > *En el borde, el Home Gateway conecta su puerto Internet mediante un cable directo de cobre hacia el switch Cisco Catalyst 2960 de la nube.*
+  > *En el segmento WAN `203.0.113.0/24` desacoplamos los servicios para garantizar escalabilidad: el Broker MQTT en la IP `.10`, el Servidor Web del Dashboard en la IP `.20`, y la Laptop del Observador en la IP `.30`.."*
 
-#### [02:30 - 03:45] Bloque 4: Demostración en Vivo en Cisco Packet Tracer (`RA2.3.pkt`)
-* **Responsable**: Estudiante 2.
+#### [02:30 - 03:45] Bloque 4: Demostración Experimental en Vivo (`RA2.3.pkt`)
 * **Apoyo en Pantalla**: Cisco Packet Tracer interactivo:
-  1. Mostrar la vinculación inalámbrica de los 4 equipos con el Home Gateway.
-  2. Abrir el Command Prompt en `Laptop_Observador`: mostrar `ipconfig` (`192.168.25.103`) y ejecutar `ping 203.0.113.1` (0% pérdida).
-  3. Abrir `Web Browser` en la laptop, escribir `http://203.0.113.1` y mostrar el Dashboard con las métricas renderizadas.
-  4. Activar Simulation Mode y avanzar un paquete para mostrar la traducción PAT.
+  1. Mostrar la asociación Wi-Fi activa de `Nodo_Chia`, `Nodo_Cajica` y `Nodo_Zipaquira`.
+  2. Abrir Command Prompt en `Nodo_Chia`: ejecutar `ping 192.168.25.1` (LAN OK) y luego `ping 203.0.113.10` (Broker en la WAN OK con 0% pérdida a través de NAT).
+  3. Abrir la app `MQTT Client` en `Laptop_Observador`: suscripción a `sabanacentro/#`.
+  4. Abrir `MQTT Client` en un nodo sensor y presionar **Publish**: verificar la llegada inmediata del mensaje JSON en la laptop.
+  5. En `Laptop_Observador`, abrir Web Browser y cargar `http://203.0.113.20`: mostrar el Dashboard con las 3 subestaciones.
+  6. Cambiar a **Simulation Mode**, filtrar por ICMP/HTTP/MQTT y avanzar un paquete para mostrar la traducción PAT en el Gateway.
 * **Diálogo**:
-  > *"Gracias. En Cisco Packet Tracer, con nuestro archivo oficial `RA2.3.pkt`, apreciamos cómo los nodos sensores y la laptop del observador están asociados por radiofrecuencia al SSID 'SabanaCentro_IoT'.*
-  > *Al verificar la Laptop, confirmamos que el servidor DHCP del Gateway le otorgó la IP `192.168.25.103`. Ejecutamos un ping a la IP pública del servidor cloud `203.0.113.1`, obteniendo respuesta inmediata con 0% de pérdidas a través del enlace WAN.*
-  > *Ahora abrimos el navegador web de la laptop y cargamos la dirección pública del servidor: inmediatamente visualizamos el Dashboard de Sabana Centro, reportando en tiempo real el nivel del río en 2.45 metros, el caudal en 18.2 L/min, el tanque al 74.2% y la evapotranspiración en 3.8 mm/día.*
-  > *En el modo simulación podemos evidenciar cómo el Home Gateway toma la PDU con IP privada y aplica traducción dinámica PAT, permitiendo que la telemetría viaje de forma transparente por la red pública."*
+  > *"En pantalla observamos la topología `RA2.3.pkt` en ejecución.*
+  > *Primero, verificamos la conectividad: abrimos la consola de `Nodo_Chia` y hacemos ping a la interfaz LAN del gateway `192.168.25.1`. La respuesta es inmediata.*
+  > *Ahora probamos el cruce perimetral: ejecutamos un ping a la IP pública del Broker `203.0.113.10`. Obtenemos 0% de pérdidas, validando que el gateway enruta y aplica NAT hacia la WAN.*
+  > *En la Laptop del Observador tenemos la aplicación MQTT Client suscrita al canal global `sabanacentro/#`. Al emitir una publicación de telemetría desde el nodo sensor, el mensaje en formato JSON es recibido de forma instantánea.*
+  > *Seguidamente, en el navegador web de la laptop consultamos `http://203.0.113.20`, cargando el Dashboard de Sabana Centro con los niveles de Chía (2.45 m), el reservorio de Cajicá al 74.2% y las condiciones agro-climáticas de Zipaquirá.*
+  > *Finalmente, en el modo simulación podemos comprobar cómo el Home Gateway toma la trama con IP privada de origen y traduce dinámicamente el puerto e IP a la dirección pública `203.0.113.2` mediante PAT."*
 
-#### [03:45 - 04:30] Bloque 5: Troubleshooting y Retos de Ingeniería Resueltos
-* **Responsable**: Estudiante 2.
-* **Apoyo en Pantalla**: Mostrar la pestaña de configuración estática WAN /30 del Gateway y la lista de filtros de eventos de simulación.
+### Kapum
+#### [03:45 - 04:30] Bloque 5: Troubleshooting y Retos de Ingeniería Superados
+* **Apoyo en Pantalla**: Mostrar en Packet Tracer la configuración de IP estática en los nodos, la máscara `/24` en la interfaz WAN del gateway y la prueba de ping fallida hacia la LAN privada.
 * **Diálogo**:
-  > *"Durante la fase experimental resolvimos retos técnicos críticos:*
-  > *Primero, la ambigüedad en la asociación Wi-Fi: fijamos un SSID unificado con canal dedicado para evitar que los nodos quedaran sin enlace.*
-  > *Segundo, la comunicación WAN directa: configuramos el puerto de Internet con máscara /30 y puerta de enlace explícita hacia el servidor, garantizando que el motor de NAT traduzca correctamente los paquetes salientes.*
-  > *Y tercero, la optimización física: descartamos switches intermedios y consolidamos todo en el Home Gateway, logrando una simulación determinista y de máxima fidelidad."*
+  > *"Durante el desarrollo experimental superamos retos de ingeniería significativos:*
+  > *Primero, detectamos que el modelo de Home Gateway DLC-100 no dispone de servidor DHCP configurable en su microcódigo, provocando direcciones APIPA en los nodos. Resolvimos esto implementando un esquema de direccionamiento estático determinístico en campo.*
+  > *Segundo, corregimos la máscara del enlace WAN de un prefijo restrictivo /30 a una subred /24, permitiendo que el Broker, el servidor web y el puesto de observación coexistan en el mismo segmento público interconectados por un switch de capa 2.*
+  > *Y tercero, comprobamos el aislamiento de seguridad: al ejecutar un ping desde la nube hacia la IP privada `192.168.25.101`, el tráfico expira al 100%, demostrando que el firewall y la tabla NAT del gateway protegen a los nodos de ataques provenientes de Internet."*
 
 #### [04:30 - 05:00] Bloque 6: Conclusiones y Cierre
 * **Responsable**: Ambos estudiantes en pantalla.
-* **Apoyo en Pantalla**: Diapositiva de cierre con conclusiones, repositorio del proyecto y referencias bibliográficas IEEE.
+* **Apoyo en Pantalla**: Diapositiva final con conclusiones técnicas, enlace al repositorio GitHub y referencias normalizadas en estándar IEEE.
 * **Diálogo**:
-  > *(Estudiante 1)*: *"En conclusión, validamos exitosamente un ecosistema de conectividad IoT completo, escalable y energéticamente viable para la gestión del recurso hídrico en Sabana Centro."*
-  > *(Estudiante 2)*: *"Demostramos que con una adecuada selección de protocolos ligeros como MQTT y una arquitectura de red optimizada, es posible monitorear variables hidrológicas críticas con una infraestructura física mínima y de bajo costo. Muchas gracias."*
-
----
-
-## 6. Referencias Bibliográficas (Normas IEEE)
-
-```text
-[1] ISO/IEC, "Information technology — Internet of Things (IoT) — Reference Architecture," ISO/IEC Standard 30141:2018, Nov. 2018.
-[2] OASIS, "MQTT Version 3.1.1. OASIS Standard," A. Banks and R. Gupta, Eds., Oct. 2014. [En línea]. Disponible: http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
-[3] Cisco Systems, "Cisco Packet Tracer 8.2/9.0 IoT Configuration and Simulation Guide," Cisco Networking Academy, 2024.
-[4] Instituto de Hidrología, Meteorología y Estudios Ambientales (IDEAM), "Informe Técnico sobre el Balance Hídrico y Sequías en la Región Andina," Bogotá, Colombia, 2026.
-[5] Corporación Autónoma Regional de Cundinamarca (CAR), "Plan de Gestión Integral del Recurso Hídrico para la Cuenca Alta del Río Bogotá y Sabana Centro," Bogotá, Colombia, 2026.
-[6] J. Postel, "Internet Protocol - DARPA Internet Program Protocol Specification," RFC 791, Sep. 1981.
-[7] P. Srisuresh and K. Egevang, "Traditional IP Network Address Translator (Traditional NAT)," RFC 3022, Jan. 2001.
-[8] IEEE, "IEEE Standard for Local and Metropolitan Area Networks--Part 11: Wireless LAN Medium Access Control (MAC) and Physical Layer (PHY) Specifications," IEEE Std 802.11-2020, Feb. 2021.
-```
+  > *(Estudiante 1)*: *"En conclusión, logramos validar experimentalmente un ecosistema IoT distribuido, interoperable y de ultra bajo costo para la mitigación del riesgo hídrico en Sabana Centro, cumpliendo a cabalidad con las 5 capas de la norma ISO/IEC 30141."*
+  > *(Estudiante 2)*: *"Demostramos que la combinación de procesamiento de borde, conectividad Wi-Fi nativa del ESP32 y el protocolo MQTT permite supervisar variables hidrometeorológicas críticas con máxima eficiencia energética y de red. Muchas gracias."*

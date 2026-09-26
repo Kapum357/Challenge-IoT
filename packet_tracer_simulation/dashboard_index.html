@@ -118,11 +118,11 @@
     </div>
 
     <div class="grid">
-        <!-- Sub-estacion 1 -->
+        <!-- Sub-estacion 1: Nodo Chia -->
         <div class="card">
-            <h2>1. MICROCUENCA / CAPTACIÓN</h2>
+            <h2>1. ESTACIÓN CHÍA (BOCATOMA RÍO FRÍO)</h2>
             <div class="metric-box">
-                <div class="label">Nivel de Agua (Río / Bocatoma):</div>
+                <div class="label">Nivel de Agua:</div>
                 <div class="metric">2.45 <span class="unit">m</span></div>
             </div>
             <div class="metric-box">
@@ -130,48 +130,48 @@
                 <div class="metric">18.2 <span class="unit">L/min</span></div>
             </div>
             <div>
-                <p>Estado Operativo: <span class="badge-normal">NORMAL (QoS 0)</span></p>
+                <p>Estado de Riesgo: <span class="badge-normal">ESTADO NORMAL</span></p>
             </div>
-            <div class="topic-tag">MQTT: sabanacentro/chia/microcuenca/data</div>
+            <div class="topic-tag">MQTT: sabanacentro/chia/data</div>
         </div>
 
-        <!-- Sub-estacion 2 -->
+        <!-- Sub-estacion 2: Nodo Cajica -->
         <div class="card">
-            <h2>2. TANQUE DE ALMACENAMIENTO</h2>
+            <h2>2. ESTACIÓN CAJICÁ (RESERVORIO CANELÓN)</h2>
             <div class="metric-box">
-                <div class="label">Volumen Disponible:</div>
-                <div class="metric">74.2 <span class="unit">%</span></div>
+                <div class="label">Nivel Relativo de Almacenamiento:</div>
+                <div class="metric">3.10 <span class="unit">m (74.2%)</span></div>
             </div>
             <div class="metric-box">
-                <div class="label">Presión Hidrostática en Solera:</div>
-                <div class="metric">30.4 <span class="unit">kPa</span></div>
+                <div class="label">Caudal de Inyección / Salida:</div>
+                <div class="metric">12.5 <span class="unit">L/min</span></div>
             </div>
             <div>
-                <p>Nivel de Reserva: <span class="badge-normal">OPERATIVO ESTABLE</span></p>
+                <p>Estado de Riesgo: <span class="badge-normal">ESTADO NORMAL</span></p>
             </div>
-            <div class="topic-tag">MQTT: sabanacentro/chia/tanque/data</div>
+            <div class="topic-tag">MQTT: sabanacentro/cajica/data</div>
         </div>
 
-        <!-- Sub-estacion 3 -->
+        <!-- Sub-estacion 3: Nodo Zipaquira -->
         <div class="card">
-            <h2>3. CLIMATOLOGÍA DE BORDE</h2>
+            <h2>3. ESTACIÓN ZIPAQUIRÁ (AGRO-CLIMA PANTANO)</h2>
             <div class="metric-box">
-                <div class="label">Temperatura / Presión Barométrica:</div>
-                <div class="metric">16.8 <span class="unit">°C</span> | 745 <span class="unit">hPa</span></div>
+                <div class="label">Temperatura / Humedad:</div>
+                <div class="metric">14.8 <span class="unit">°C | 71% HR</span></div>
             </div>
             <div class="metric-box">
-                <div class="label">Evapotranspiración Estimada (ETo):</div>
-                <div class="metric">3.8 <span class="unit">mm/día</span></div>
+                <div class="label">Presión Barométrica / ETo Hargreaves:</div>
+                <div class="metric">748 <span class="unit">hPa | 3.6 mm/d</span></div>
             </div>
             <div>
-                <p>Riesgo Agro-Climático: <span class="badge-normal">MODERADO</span></p>
+                <p>Estado de Riesgo: <span class="badge-alert">ESTADO: ESTRÉS MODERADO</span></p>
             </div>
-            <div class="topic-tag">MQTT: sabanacentro/chia/clima/data</div>
+            <div class="topic-tag">MQTT: sabanacentro/zipaquira/data</div>
         </div>
     </div>
 
     <div class="footer">
-        Facultad de Ingeniería — Universidad de La Sabana | Protocolo: MQTT v3.1.1 sobre TCP/IP | NAT Gateway WAN: 203.0.113.2 | Servidor Cloud: 203.0.113.1
+        Facultad de Ingeniería — Universidad de La Sabana | Broker: 203.0.113.10 | Servidor Web: 203.0.113.20 | Gateway WAN: 203.0.113.2
     </div>
 
 </body>

@@ -45,7 +45,7 @@ uint32_t ipToUint(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 int main() {
     std::cout << "========================================================\n";
     std::cout << " EJECUTANDO SUITE DE PRUEBAS UNITARIAS: CHALLENGE 2     \n";
-    std::cout << " Sistema de Monitoreo Hidrologico Sabana Centro (BME280)\n";
+    std::cout << " Sistema de Monitoreo Hidrologico Sabana Centro (SHT30)\n";
     std::cout << " Incluye correcciones de bugs del Ch1 + nuevas funciones\n";
     std::cout << "========================================================\n\n";
 
@@ -236,9 +236,9 @@ int main() {
     expectInt(rsm.stableState(), 0, "RSM: 5 muestras NORMAL des-escala de 1 a 0");
 
     // ========================================================================
-    // 10. Verificación de TelemetryRecord y Campo de Humedad (BME280)
+    // 10. Verificación de TelemetryRecord y Campo de Humedad (SHT30)
     // ========================================================================
-    std::cout << "\n--- 10. Estructura de Telemetria (BME280) ---\n";
+    std::cout << "\n--- 10. Estructura de Telemetria (SHT30) ---\n";
     iot::watermonitor::TelemetryRecord sampleRecord{};
     sampleRecord.uptimeSec = 1200;
     sampleRecord.levelCm = 35.5f;
@@ -251,7 +251,7 @@ int main() {
     sampleRecord.etoMmDay = 3.9f;
     sampleRecord.riskState = 0;
 
-    expectNear(sampleRecord.humidityPct, 68.5f, 0.01f, "TelemetryRecord.humidityPct almacena valor BME280");
+    expectNear(sampleRecord.humidityPct, 68.5f, 0.01f, "TelemetryRecord.humidityPct almacena valor SHT30");
     expectTrue(sizeof(iot::watermonitor::TelemetryRecord) == 37, "TelemetryRecord empaquetado (#pragma pack) = 37 bytes");
 
     // ========================================================================

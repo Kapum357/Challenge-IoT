@@ -1,10 +1,12 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BME280.h>
-#include <LiquidCrystal.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <Adafruit_SHT31.h>
 #include <LittleFS.h>
 #include <time.h>
 #include <mbedtls/sha256.h>
@@ -15,23 +17,25 @@
 // Sabana Centro, Cundinamarca - Latitud: 4.81° N (2,600 m.s.n.m.)
 // Challenge #2: Arquitectura Concurrente Dual-Core FreeRTOS (Core 0 / Core 1)
 //   + WebServer (Core 0) + Autenticación SHA-256 + LittleFS + NTP + Histéresis
-// Hardware: ESP32 DevKit v1 + HC-SR04 + BME280 + LCD1602A + Buzzer + LEDs
+// Hardware: ESP32 DevKit v1 + HC-SR04 + SHT30 + ILI9341 SPI + SD + Buzzer + LEDs
 // ============================================================================
 
 // Mapeo de Pines de Hardware
-#define PIN_TRIG        18
-#define PIN_ECHO        19
+#define PIN_TRIG        4
+#define PIN_ECHO        34
 #define PIN_FLOW_HALL   14
 #define PIN_BUZZER      27
 #define PIN_LED_RED     25
 #define PIN_LED_GREEN   26
 #define PIN_LED_BLUE    33
-#define PIN_LCD_RS      23
-#define PIN_LCD_EN      17
-#define PIN_LCD_D4      16
-#define PIN_LCD_D5       4
-#define PIN_LCD_D6       5
-#define PIN_LCD_D7      13
+#define PIN_TFT_SCK     18
+#define PIN_TFT_MISO    19
+#define PIN_TFT_MOSI    23
+#define PIN_TFT_CS      5
+#define PIN_TFT_DC      16
+#define PIN_TFT_RST     17
+#define PIN_TFT_BL      32
+#define PIN_SD_CS       13
 
 // Constantes de Muestreo y Bus
 constexpr int I2C_SDA_PIN = 21;
@@ -39,6 +43,7 @@ constexpr int I2C_SCL_PIN = 22;
 constexpr unsigned long SAMPLE_PERIOD_MS = 2000;
 constexpr unsigned long HISTORY_PERSIST_MS = 900000; // Persistir cada 15 min
 constexpr uint32_t DEFAULT_SILENCE_SEC = 300;
+constexpr float PRESSURE_UNAVAILABLE_HPA = -1.0f;
 
 // Credenciales de Autenticación (SHA-256 hash de "sabana2026" con salt "SabanaCentro")
 const char* AUTH_USERNAME = "admin";
@@ -51,15 +56,27 @@ constexpr long GMT_OFFSET_SEC = -5 * 3600; // UTC-5 Colombia
 constexpr int DAYLIGHT_OFFSET_SEC = 0;
 const char* NTP_SERVER = "pool.ntp.org";
 
+// Configuración de Red: Default STA con Fallback Dinámico a SoftAP
+const char* WIFI_STA_SSID = "Wokwi-GUEST";
+const char* WIFI_STA_PASS = "";
+const char* WIFI_AP_SSID  = "AguaSabana-Nodo";
+const char* WIFI_AP_PASS  = "sabana2026";
+constexpr unsigned long WIFI_STA_TIMEOUT_MS = 10000;        // 10s ventana estricta de arranque
+constexpr unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000; // 15s intervalo de reintento en Core 0
+
+// Estado de Conectividad Wi-Fi
+bool apFallbackActive = false;
+unsigned long lastStaRetryMillis = 0;
+
 // Instancias de Periféricos y Servidor Web Local en puerto 80 (Core 0)
-Adafruit_BME280 bme;
-LiquidCrystal   lcd(PIN_LCD_RS, PIN_LCD_EN,
-                    PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
+Adafruit_SHT31  sht30 = Adafruit_SHT31();
+Adafruit_ILI9341 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 WebServer       server(80);
 
 // Sincronización y Primitivas FreeRTOS
 static portMUX_TYPE flowMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t telemetryMutex = NULL;
+SemaphoreHandle_t spiMutex = NULL;
 TaskHandle_t xWebServerTaskHandle = NULL;
 TaskHandle_t xSensorTaskHandle = NULL;
 TaskHandle_t xAnalyticsTaskHandle = NULL;
@@ -76,11 +93,13 @@ volatile unsigned long pulseCounter = 0;
 // Variables de Estado Compartido
 float currentFlowFactor = iot::watermonitor::FLOW_FACTOR;
 int manualRiskOverride = -1;
-bool bmeAvailable = false;
-uint8_t bmeAddress = 0x76;
+bool sht30Available = false;
+uint8_t sht30Address = 0x44;
 bool ntpSynced = false;
 bool echoSensorOk = true;
 bool littleFsMounted = false;
+bool sdMounted = false;
+File telemetryLog;
 
 // Perro Guardián de Silenciamiento Remoto
 bool isAlarmSilenced = false;
@@ -256,26 +275,42 @@ void recoverI2CBus(int sdaPin, int sclPin) {
 }
 
 // ============================================================================
-// Detección Dual de Dirección I2C del BME280 (0x76 / 0x77) con Recuperación
+// Detección de dirección I2C del SHT30 (0x44 / 0x45) con recuperación
 // ============================================================================
-bool detectAndInitBME280() {
-    if (bme.begin(0x76, &Wire)) { bmeAddress = 0x76; bmeAvailable = true; }
-    else if (bme.begin(0x77, &Wire)) { bmeAddress = 0x77; bmeAvailable = true; }
+bool detectAndInitSHT30() {
+    if (sht30.begin(0x44)) { sht30Address = 0x44; sht30Available = true; }
+    else if (sht30.begin(0x45)) { sht30Address = 0x45; sht30Available = true; }
     else {
         recoverI2CBus(I2C_SDA_PIN, I2C_SCL_PIN);
-        if (bme.begin(0x76, &Wire)) { bmeAddress = 0x76; bmeAvailable = true; }
-        else if (bme.begin(0x77, &Wire)) { bmeAddress = 0x77; bmeAvailable = true; }
-        else { bmeAvailable = false; }
+        if (sht30.begin(0x44)) { sht30Address = 0x44; sht30Available = true; }
+        else if (sht30.begin(0x45)) { sht30Address = 0x45; sht30Available = true; }
+        else { sht30Available = false; }
     }
-    if (bmeAvailable) {
-        bme.setSampling(Adafruit_BME280::MODE_NORMAL,
-                        Adafruit_BME280::SAMPLING_X2,
-                        Adafruit_BME280::SAMPLING_X16,
-                        Adafruit_BME280::SAMPLING_X1,
-                        Adafruit_BME280::FILTER_X16,
-                        Adafruit_BME280::STANDBY_MS_500);
+    if (sht30Available) {
+        sht30.heater(false);
     }
-    return bmeAvailable;
+    return sht30Available;
+}
+
+void appendTelemetryToSd(const iot::watermonitor::TelemetryRecord& record) {
+    if (!sdMounted || spiMutex == NULL ||
+        xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+
+    File file = SD.open("/telemetry.csv", FILE_APPEND);
+    if (!file) {
+        Serial.println("[WARN] No se pudo abrir /telemetry.csv en SD.");
+        xSemaphoreGive(spiMutex);
+        return;
+    }
+    file.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u\n",
+                static_cast<unsigned long>(record.uptimeSec),
+                record.levelCm, record.levelPercent, record.flowLMin,
+                record.dropRateCmH, record.tempC, record.pressureHpa,
+                record.humidityPct, record.etoMmDay, record.riskState);
+    file.close();
+    xSemaphoreGive(spiMutex);
 }
 
 // ============================================================================
@@ -309,6 +344,111 @@ int getDayOfYear() {
     }
     ntpSynced = false;
     return 180; // Fallback si NTP no está disponible
+}
+
+// ============================================================================
+// Inicialización Resiliente de Red: Default STA con Fallback a SoftAP
+// ============================================================================
+void initWiFiNetwork() {
+    Serial.println("\n[WIFI] Modo Default: STA. Intentando conexion a infraestructura...");
+    Serial.printf("[WIFI] SSID: '%s' (Timeout estricto: %lu s)...\n",
+                  WIFI_STA_SSID, WIFI_STA_TIMEOUT_MS / 1000UL);
+
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setCursor(8, 12);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.println("WiFi: Conectando");
+    tft.println("Modo: STA");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false);
+    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+
+    unsigned long startAttempt = millis();
+    bool connected = false;
+
+    while (millis() - startAttempt < WIFI_STA_TIMEOUT_MS) {
+        if (WiFi.status() == WL_CONNECTED) {
+            connected = true;
+            break;
+        }
+        delay(250);
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (connected) {
+        apFallbackActive = false;
+        Serial.printf("[OK] Conectado a STA exitosamente! IP: %s  RSSI: %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setCursor(8, 12);
+        tft.setTextSize(2);
+        tft.setTextColor(ILI9341_GREEN);
+        tft.println("WiFi: STA");
+        tft.setTextColor(ILI9341_WHITE);
+        tft.println(WiFi.localIP());
+        delay(1200);
+    } else {
+        // Falla estricta: Timeout agotado
+        apFallbackActive = true;
+        Serial.println("[WARN] Falla estricta: Timeout de conexion STA agotado.");
+        Serial.printf("[WARN] Activando Fallback SoftAP: '%s'...\n", WIFI_AP_SSID);
+
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+
+        Serial.printf("[OK] SoftAP Fallback listo: %s  IP: %s\n",
+                      WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
+
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setCursor(8, 12);
+        tft.setTextSize(2);
+        tft.setTextColor(ILI9341_YELLOW);
+        tft.println("WiFi: SoftAP");
+        tft.setTextColor(ILI9341_WHITE);
+        tft.println(WiFi.softAPIP());
+        delay(1200);
+    }
+}
+
+// ============================================================================
+// Supervisión Dinámica de Red (Ejecutada periódicamente en Core 0)
+// ============================================================================
+void manageWiFiConnectivity() {
+    static unsigned long lastCheckMillis = 0;
+    unsigned long now = millis();
+
+    if (now - lastCheckMillis < 2000) {
+        return;
+    }
+    lastCheckMillis = now;
+
+    if (WiFi.status() == WL_CONNECTED) {
+        if (apFallbackActive) {
+            apFallbackActive = false;
+            Serial.printf("[WIFI] Enlace STA restablecido dinamicamente. IP: %s  RSSI: %d dBm\n",
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            if (!ntpSynced) {
+                configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+            }
+        }
+    } else {
+        if (!apFallbackActive) {
+            apFallbackActive = true;
+            Serial.println("\n[WARN] Perdida de enlace STA. Activando Fallback SoftAP dinamicamente...");
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+            Serial.printf("[OK] SoftAP Fallback activo: %s  IP: %s\n",
+                          WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
+            lastStaRetryMillis = now;
+        } else if (now - lastStaRetryMillis >= WIFI_RECONNECT_INTERVAL_MS) {
+            lastStaRetryMillis = now;
+            Serial.printf("[WIFI] Reintentando asociacion a red STA (%s)...\n", WIFI_STA_SSID);
+            WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+        }
+    }
 }
 
 // ============================================================================
@@ -402,7 +542,7 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
 </head>
 <body>
 <h1>NODO IOT SABANA CENTRO</h1>
-<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; BME280 &bull; Histeresis</div>
+<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; SHT30 + ILI9341 &bull; Histeresis</div>
 <div id="risk-badge" class="badge b-norm">ESTADO: NORMAL</div>
 <div class="grid">
   <div class="card" style="grid-column:span 2">
@@ -417,7 +557,7 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
     <div class="card-v"><span id="drop">--</span> <span class="unit">cm/h</span></div>
   </div>
   <div class="card">
-    <div class="card-t">Temperatura (BME280)</div>
+    <div class="card-t">Temperatura (SHT30)</div>
     <div class="card-v"><span id="temp">--</span> <span class="unit">&deg;C</span></div>
     <div class="card-t">Humedad Relativa</div>
     <div class="card-v"><span id="hum">--</span> <span class="unit">%HR</span></div>
@@ -433,9 +573,10 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
   <div class="card" style="grid-column:span 2">
     <div class="card-t">Diagn&oacute;stico y Salud de Hardware</div>
     <div style="display:flex;justify-content:space-between;font-size:0.75rem;padding-top:4px;flex-wrap:wrap;gap:6px">
-      <span>BME280: <b id="hw-bme">--</b></span>
+      <span>SHT30: <b id="hw-sht">--</b></span>
       <span>Eco US: <b id="hw-echo">--</b></span>
       <span>LittleFS: <b id="hw-fs">--</b></span>
+      <span>SD: <b id="hw-sd">--</b></span>
       <span>RAM: <b id="hw-ram">--</b></span>
       <span>WiFi: <b id="hw-rssi">--</b></span>
     </div>
@@ -478,11 +619,11 @@ function upd(){
     document.getElementById('drop').textContent=d.drop_rate.toFixed(2);
     document.getElementById('temp').textContent=d.temp_c.toFixed(1);
     document.getElementById('hum').textContent=d.humidity_pct.toFixed(1);
-    document.getElementById('press').textContent=d.pressure_hpa.toFixed(0);
+    document.getElementById('press').textContent=d.pressure_hpa<0?'N/D':d.pressure_hpa.toFixed(0);
     document.getElementById('eto').textContent=d.eto_mm_day.toFixed(2);
     let b=document.getElementById('risk-badge');
     let cls=['b-norm','b-stress','b-alert','b-emerg'];
-    b.className='badge '+cls[d.risk_state]||cls[0];
+    b.className='badge '+(cls[d.risk_state]||cls[0]);
     b.textContent='ESTADO: '+d.risk_label+(d.override>=0?' [MANUAL]':'')+(d.silenced?' [SILENCIADO]':'');
     let bar=document.getElementById('lvl-bar');
     bar.style.background=d.risk_state>=2?'var(--red)':d.risk_state==1?'var(--yellow)':'var(--green)';
@@ -491,17 +632,30 @@ function upd(){
       ' | Histeresis: '+(d.hysteresis_state>=0?'R'+d.hysteresis_state:'activa')+
       (d.silenced?' | Silencio: '+d.silence_s+'s':'');
     if(d.hw){
-      let bmeEl=document.getElementById('hw-bme');
-      bmeEl.textContent=d.hw.bme?'ONLINE':'FALLO';
-      bmeEl.style.color=d.hw.bme?'var(--green)':'var(--red)';
+      let shtEl=document.getElementById('hw-sht');
+      shtEl.textContent=d.hw.sht?'ONLINE':'FALLO';
+      shtEl.style.color=d.hw.sht?'var(--green)':'var(--red)';
       let echoEl=document.getElementById('hw-echo');
       echoEl.textContent=d.hw.echo?'OK':'SIN ECO';
       echoEl.style.color=d.hw.echo?'var(--green)':'var(--red)';
       let fsEl=document.getElementById('hw-fs');
       fsEl.textContent=d.hw.fs?'MONTADO':'N/A';
       fsEl.style.color=d.hw.fs?'var(--green)':'var(--yellow)';
+      let sdEl=document.getElementById('hw-sd');
+      sdEl.textContent=d.hw.sd?'MONTADA':'N/A';
+      sdEl.style.color=d.hw.sd?'var(--green)':'var(--yellow)';
       document.getElementById('hw-ram').textContent=d.hw.heap_kb+' KB';
-      document.getElementById('hw-rssi').textContent=d.hw.rssi+' dBm';
+      let wifiEl=document.getElementById('hw-rssi');
+      if(d.hw.wifi_sta){
+        wifiEl.textContent='STA ('+d.hw.rssi+' dBm)';
+        wifiEl.style.color='var(--green)';
+      }else if(d.hw.ap_fallback){
+        wifiEl.textContent='AP Fallback';
+        wifiEl.style.color='var(--yellow)';
+      }else{
+        wifiEl.textContent='DESCONECT';
+        wifiEl.style.color='var(--red)';
+      }
     }
   }).catch(()=>{location.href='/login';});
 }
@@ -549,13 +703,13 @@ bool validateSubnetFilter() {
     IPAddress clientIP = client.remoteIP();
     IPAddress mask(255, 255, 255, 0);
 
-    // 1. Validar contra la subred del SoftAP local (192.168.4.0/24)
+    // 1. Validar contra la subred del SoftAP local (192.168.4.0/24) si está activo
     IPAddress apIP = WiFi.softAPIP();
     uint32_t cIp = static_cast<uint32_t>(clientIP);
     uint32_t apIpUint = static_cast<uint32_t>(apIP);
     uint32_t sMask = static_cast<uint32_t>(mask);
 
-    if (iot::watermonitor::isSubnetAllowed(cIp, apIpUint, sMask)) {
+    if (apIpUint != 0 && iot::watermonitor::isSubnetAllowed(cIp, apIpUint, sMask)) {
         return true;
     }
 
@@ -680,15 +834,16 @@ void handleApiData() {
     int effectiveRisk = (currentOverride >= 0) ? currentOverride : rec.riskState;
     int rssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
     uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
+    bool staConnected = (WiFi.status() == WL_CONNECTED);
 
-    char json[512];
+    char json[576];
     snprintf(json, sizeof(json),
         "{\"level_cm\":%.2f,\"level_pct\":%.1f,\"flow_lmin\":%.2f,\"drop_rate\":%.2f,"
         "\"temp_c\":%.2f,\"pressure_hpa\":%.2f,\"humidity_pct\":%.2f,\"eto_mm_day\":%.2f,"
         "\"risk_state\":%d,\"risk_label\":\"%s\",\"override\":%d,"
         "\"silenced\":%s,\"silence_s\":%lu,\"uptime_s\":%lu,"
         "\"ntp_synced\":%s,\"hysteresis_state\":%d,"
-        "\"hw\":{\"bme\":%s,\"echo\":%s,\"fs\":%s,\"heap_kb\":%u,\"rssi\":%d}}",
+        "\"hw\":{\"sht\":%s,\"echo\":%s,\"fs\":%s,\"sd\":%s,\"heap_kb\":%u,\"rssi\":%d,\"wifi_sta\":%s,\"ap_fallback\":%s}}",
         rec.levelCm, rec.levelPercent, rec.flowLMin, rec.dropRateCmH,
         rec.tempC, rec.pressureHpa, rec.humidityPct, rec.etoMmDay,
         effectiveRisk, iot::watermonitor::riskLabel(effectiveRisk),
@@ -696,10 +851,13 @@ void handleApiData() {
         static_cast<unsigned long>(silenceRemainingSec),
         static_cast<unsigned long>(rec.uptimeSec),
         (ntpSynced ? "true" : "false"), hystState,
-        (bmeAvailable ? "true" : "false"),
+        (sht30Available ? "true" : "false"),
         (echoSensorOk ? "true" : "false"),
         (littleFsMounted ? "true" : "false"),
-        (unsigned int)freeHeapKb, rssi
+        (sdMounted ? "true" : "false"),
+        (unsigned int)freeHeapKb, rssi,
+        (staConnected ? "true" : "false"),
+        (apFallbackActive ? "true" : "false")
     );
     server.send(200, "application/json", json);
 }
@@ -788,19 +946,23 @@ void Task_WebServer_HTTP(void* pvParameters) {
 
     for (;;) {
         server.handleClient();
+        manageWiFiConnectivity();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: Adquisición de Sensores (HC-SR04, Hall, BME280)
+// Tarea FreeRTOS Core 1: Adquisición de Sensores (HC-SR04, Hall, SHT30)
 // ============================================================================
 void Task_SensorAcquisition(void* pvParameters) {
     (void)pvParameters;
     TickType_t lastWakeTime = xTaskGetTickCount();
     float prevLevel = iot::watermonitor::TANK_HEIGHT_CM;
+    float lastValidTempC = 20.0f;
+    float lastValidHumidityPct = 65.0f;
     unsigned long lastAcqTime = millis();
-    unsigned long lastBmeRetry = 0;
+    unsigned long lastShtRetry = 0;
+    unsigned long lastSdPersist = 0;
 
     for (;;) {
         unsigned long now = millis();
@@ -814,22 +976,25 @@ void Task_SensorAcquisition(void* pvParameters) {
         pulseCounter = 0;
         portEXIT_CRITICAL(&flowMux);
 
-        // 2. Lectura BME280 con reintento periódico
+        // 2. Lectura SHT30 con reintento periódico. El SHT30 no mide presión.
         float ambientTempC = 20.0f;
-        float pressureHpa = 1013.25f;
+        float pressureHpa = PRESSURE_UNAVAILABLE_HPA;
         float humidityPct = 65.0f;
 
-        if (bmeAvailable) {
-            ambientTempC = bme.readTemperature();
-            pressureHpa = bme.readPressure() / 100.0f;
-            humidityPct = bme.readHumidity();
-            if (isnan(ambientTempC) || isnan(pressureHpa) || isnan(humidityPct)) {
-                ambientTempC = 20.0f; pressureHpa = 1013.25f; humidityPct = 65.0f;
-                bmeAvailable = false;
+        if (sht30Available) {
+            ambientTempC = sht30.readTemperature();
+            humidityPct = sht30.readHumidity();
+            if (isnan(ambientTempC) || isnan(humidityPct)) {
+                ambientTempC = lastValidTempC;
+                humidityPct = lastValidHumidityPct;
+                sht30Available = false;
+            } else {
+                lastValidTempC = ambientTempC;
+                lastValidHumidityPct = humidityPct;
             }
-        } else if (now - lastBmeRetry > 30000) {
-            lastBmeRetry = now;
-            detectAndInitBME280();
+        } else if (now - lastShtRetry > 30000) {
+            lastShtRetry = now;
+            detectAndInitSHT30();
         }
 
         // 3. Medición de Nivel Acústico (Fail-Safe: mantiene último válido)
@@ -869,6 +1034,7 @@ void Task_EdgeAnalytics(void* pvParameters) {
     (void)pvParameters;
     float previousWaterLevel = iot::watermonitor::TANK_HEIGHT_CM;
     bool isFirstAnalyticsRun = true;
+    unsigned long lastSdPersist = 0;
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -922,60 +1088,95 @@ void Task_EdgeAnalytics(void* pvParameters) {
             sramRingBuffer.push(rec);
             xSemaphoreGive(telemetryMutex);
         }
+        unsigned long now = millis();
+        if (lastSdPersist == 0 || now - lastSdPersist >= HISTORY_PERSIST_MS) {
+            appendTelemetryToSd(rec);
+            lastSdPersist = now;
+        }
     }
 }
 
 // ============================================================================
-// Renderizado del Display LCD 1602A: Página Única Fija (16x2)
-// Fila 0: IP activa para acceder al dashboard web (prioriza STA sobre AP)
-// Fila 1: Riesgo del Momento + Estado de la Alarma Física (Buzzer)
+// Renderizado del Display ILI9341: página fija densa (240x320, RGB565)
 // ============================================================================
-char lastLcdLine0[17] = "";
-char lastLcdLine1[17] = "";
+unsigned long lastTftRenderMillis = 0;
 
-void renderLcdStatusPage(int effectiveRisk) {
-    char line0[17];
-    char line1[17];
-
-    // Fila 0: Dirección IP de acceso al Dashboard
-    if (WiFi.status() == WL_CONNECTED) {
-        snprintf(line0, sizeof(line0), "IP:%-13s", WiFi.localIP().toString().c_str());
-    } else {
-        snprintf(line0, sizeof(line0), "AP:%-13s", WiFi.softAPIP().toString().c_str());
+void renderTftStatusPage(int effectiveRisk, const iot::watermonitor::TelemetryRecord& rec) {
+    if (spiMutex == NULL ||
+        xSemaphoreTake(spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return;
     }
-
-    // Fila 1: Riesgo del Momento y Estado del Buzzer (Exactamente 16 caracteres)
-    const char* rLabel = (effectiveRisk == 0) ? "NORMAL" :
-                         (effectiveRisk == 1) ? "ESTRES" :
-                         (effectiveRisk == 2) ? "ALERTA" : "EMERG!";
-
-    if (manualRiskOverride >= 0) {
-        snprintf(line1, sizeof(line1), "*TEST*  R:%-7s", rLabel);
-    } else if (isAlarmSilenced) {
-        snprintf(line1, sizeof(line1), "R:%-6s BUZ:MUT", rLabel);
-    } else if (effectiveRisk >= 2) {
-        snprintf(line1, sizeof(line1), "R:%-6s BUZ:ON ", rLabel);
-    } else {
-        snprintf(line1, sizeof(line1), "R:%-6s BUZ:OFF", rLabel);
+    const unsigned long now = millis();
+    if (now - lastTftRenderMillis < 250) {
+        xSemaphoreGive(spiMutex);
+        return;
     }
+    lastTftRenderMillis = now;
 
-    // Actualización diferencial para evitar parpadeo en el display
-    if (strncmp(line0, lastLcdLine0, 16) != 0) {
-        lcd.setCursor(0, 0);
-        lcd.print(line0);
-        strncpy(lastLcdLine0, line0, 16);
-        lastLcdLine0[16] = '\0';
-    }
-    if (strncmp(line1, lastLcdLine1, 16) != 0) {
-        lcd.setCursor(0, 1);
-        lcd.print(line1);
-        strncpy(lastLcdLine1, line1, 16);
-        lastLcdLine1[16] = '\0';
-    }
+    const uint16_t riskColor = effectiveRisk == 0 ? ILI9341_GREEN :
+                               effectiveRisk == 1 ? ILI9341_CYAN :
+                               effectiveRisk == 2 ? ILI9341_ORANGE : ILI9341_RED;
+    const char* riskLabel = iot::watermonitor::riskLabel(effectiveRisk);
+    const String ip = WiFi.status() == WL_CONNECTED
+                        ? WiFi.localIP().toString()
+                        : ((apFallbackActive || (WiFi.getMode() & WIFI_MODE_AP))
+                           ? WiFi.softAPIP().toString() : "conectando");
+    const char* buzzer = isAlarmSilenced ? "MUT" : (effectiveRisk >= 2 ? "ON" : "OFF");
+
+    tft.fillRect(0, 0, 240, 320, ILI9341_BLACK);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(6, 5);
+    tft.print("MONITOR HIDRICO");
+    tft.setTextSize(1);
+    tft.setCursor(6, 30);
+    tft.print(WiFi.status() == WL_CONNECTED ? "IP: " : "AP: ");
+    tft.print(ip);
+    tft.setCursor(6, 43);
+    tft.print("Buzzer: ");
+    tft.print(buzzer);
+    if (manualRiskOverride >= 0) tft.print("  TEST");
+
+    tft.fillRoundRect(4, 58, 232, 38, 4, riskColor);
+    tft.setTextColor(ILI9341_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(12, 69);
+    tft.print("RIESGO: ");
+    tft.print(riskLabel);
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(8, 110);
+    tft.printf("Nivel: %5.1f cm", rec.levelCm);
+    tft.setCursor(8, 132);
+    tft.printf("Llenado: %4.1f %%", rec.levelPercent);
+    tft.setCursor(8, 154);
+    tft.printf("Caudal: %5.2f L/m", rec.flowLMin);
+    tft.setCursor(8, 176);
+    tft.printf("Descenso: %4.1f cm/h", rec.dropRateCmH);
+    tft.setCursor(8, 198);
+    tft.printf("Temp: %5.1f C", rec.tempC);
+    tft.setCursor(8, 220);
+    tft.printf("Hum:  %5.1f %%", rec.humidityPct);
+    tft.setCursor(8, 242);
+    tft.printf("ETo:  %5.2f mm/d", rec.etoMmDay);
+
+    tft.setTextSize(1);
+    tft.setCursor(8, 270);
+    tft.print("SHT30: ");
+    tft.print(sht30Available ? "OK" : "N/A");
+    tft.print("  SD: ");
+    tft.print(sdMounted ? "OK" : "N/A");
+    tft.setCursor(8, 285);
+    tft.print("Presion: ");
+    tft.print(rec.pressureHpa < 0 ? "N/D (SHT30)" : String(rec.pressureHpa, 1) + " hPa");
+    tft.setCursor(8, 302);
+    tft.printf("Uptime: %lu s", static_cast<unsigned long>(rec.uptimeSec));
+    xSemaphoreGive(spiMutex);
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: HMI Local (LCD, LEDs, Buzzer con Watchdog)
+// Tarea FreeRTOS Core 1: HMI Local (ILI9341, LEDs, Buzzer con Watchdog)
 // ============================================================================
 void Task_HMI_Local(void* pvParameters) {
     (void)pvParameters;
@@ -985,15 +1186,16 @@ void Task_HMI_Local(void* pvParameters) {
 
         int currentOverride = -1;
         int riskState = 0;
+        iot::watermonitor::TelemetryRecord record{};
         if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
             currentOverride = manualRiskOverride;
             riskState = latestRecord.riskState;
+            record = latestRecord;
             xSemaphoreGive(telemetryMutex);
         }
         int effectiveRisk = (currentOverride >= 0) ? currentOverride : riskState;
 
-        // Actualizar Display LCD 1602A (Página Única Fija)
-        renderLcdStatusPage(effectiveRisk);
+        renderTftStatusPage(effectiveRisk, record);
 
         // Watchdog de Silenciamiento
         if (isAlarmSilenced) {
@@ -1064,7 +1266,7 @@ void processCLICommand(char* cmd) {
         Serial.println("  CONSOLA DE SERVICIO - NODO IOT SABANA CENTRO (CH2)        ");
         Serial.println("------------------------------------------------------------");
         Serial.println("  help            : Muestra este menu de comandos");
-        Serial.println("  status          : Telemetria, memoria FreeRTOS y BME280");
+        Serial.println("  status          : Telemetria, memoria FreeRTOS y SHT30/SD");
         Serial.println("  test <0-3>      : Fuerza estado de riesgo");
         Serial.println("  auto            : Retorna al modo automatico");
         Serial.println("  silence <seg>   : Silencia buzzer por N segundos");
@@ -1072,6 +1274,7 @@ void processCLICommand(char* cmd) {
         Serial.println("  flow <factor>   : Ajustar factor caudalimetro");
         Serial.println("  ntp             : Muestra estado NTP y dia juliano");
         Serial.println("  hysteresis      : Muestra estado de maquina de histeresis");
+        Serial.println("  wifi            : Diagnostico de red (STA / Fallback SoftAP)");
         Serial.println("------------------------------------------------------------");
     }
     else if (strcmp(cmd, "status") == 0) {
@@ -1087,9 +1290,10 @@ void processCLICommand(char* cmd) {
         Serial.printf("[STATUS] Riesgo: %s (%d)  Override: %d  Silenciado: %s\n",
                       iot::watermonitor::riskLabel(rec.riskState), rec.riskState,
                       manualRiskOverride, isAlarmSilenced ? "SI" : "NO");
-        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  BME280: %s (0x%02X)\n",
+        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  SHT30: %s (0x%02X)  SD: %s\n",
                       (int)sramRingBuffer.size(), (int)sramRingBuffer.capacity(),
-                      rec.uptimeSec, bmeAvailable ? "OK" : "N/A", bmeAddress);
+                      rec.uptimeSec, sht30Available ? "OK" : "N/A", sht30Address,
+                      sdMounted ? "OK" : "N/A");
         Serial.printf("[STATUS] Heap libre: %d bytes  NTP: %s  Dia: %d\n",
                       ESP.getFreeHeap(), ntpSynced ? "Sincronizado" : "Fallback", getDayOfYear());
     }
@@ -1150,6 +1354,30 @@ void processCLICommand(char* cmd) {
                       iot::watermonitor::RiskStateMachine::ESCALATE_THRESHOLD,
                       iot::watermonitor::RiskStateMachine::DEESCALATE_THRESHOLD);
     }
+    else if (strcmp(cmd, "wifi") == 0) {
+        bool staConn = (WiFi.status() == WL_CONNECTED);
+        Serial.println("\n------------------------------------------------------------");
+        Serial.println("  ESTADO DE CONECTIVIDAD WI-FI (DEFAULT STA / FALLBACK AP)  ");
+        Serial.println("------------------------------------------------------------");
+        Serial.printf("  Modo Wi-Fi Actual    : %s\n",
+                      staConn ? (apFallbackActive ? "STA + SoftAP (Fallback)" : "STA (Estacion)")
+                              : (apFallbackActive ? "SoftAP (Fallback Activo)" : "STA (Desconectado)"));
+        Serial.printf("  Estado STA           : %s\n", staConn ? "CONECTADO" : "DESCONECTADO");
+        if (staConn) {
+            Serial.printf("  STA SSID             : %s\n", WiFi.SSID().c_str());
+            Serial.printf("  STA IP               : %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("  STA Mascara          : %s\n", WiFi.subnetMask().toString().c_str());
+            Serial.printf("  STA Gateway          : %s\n", WiFi.gatewayIP().toString().c_str());
+            Serial.printf("  STA RSSI             : %d dBm\n", WiFi.RSSI());
+        }
+        Serial.printf("  Fallback SoftAP      : %s\n", apFallbackActive ? "ACTIVO" : "INACTIVO");
+        if (apFallbackActive || (WiFi.getMode() & WIFI_MODE_AP)) {
+            Serial.printf("  SoftAP SSID          : %s\n", WIFI_AP_SSID);
+            Serial.printf("  SoftAP IP            : %s\n", WiFi.softAPIP().toString().c_str());
+            Serial.printf("  Clientes Conectados  : %d\n", WiFi.softAPgetStationNum());
+        }
+        Serial.println("------------------------------------------------------------");
+    }
     else {
         Serial.printf("[ERROR] Comando desconocido: '%s'. Escribe 'help'.\n", cmd);
     }
@@ -1190,7 +1418,7 @@ void setup() {
     Serial.println("\n========================================================");
     Serial.println(" NODO IOT SABANA CENTRO - CHALLENGE #2                  ");
     Serial.println(" Arquitectura Dual-Core FreeRTOS + WebServer (Core 0)  ");
-    Serial.println(" BME280 + Histeresis + Auth SHA-256 + NTP + LittleFS    ");
+    Serial.println(" SHT30 + ILI9341 + SD + Histeresis + Auth SHA-256 + NTP ");
     Serial.println("========================================================");
 
     // Configuración de Pines GPIO
@@ -1210,22 +1438,46 @@ void setup() {
     // Interrupción Externa Hall con Spinlock
     attachInterrupt(digitalPinToInterrupt(PIN_FLOW_HALL), flowPulseISR, FALLING);
 
-    // Inicialización I2C
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH);
+    pinMode(PIN_TFT_CS, OUTPUT);
+    pinMode(PIN_SD_CS, OUTPUT);
+    digitalWrite(PIN_TFT_CS, HIGH);
+    digitalWrite(PIN_SD_CS, HIGH);
+
+    // Inicialización de buses
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(100000);
+    SPI.begin(PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
 
-    // Inicializar Display LCD 1602A
-    lcd.begin(16, 2);
-    lcd.setCursor(0, 0);
-    lcd.print("MONITOR HIDRICO");
-    lcd.setCursor(0, 1);
-    lcd.print("CH2 INICIANDO..");
+    tft.begin();
+    tft.setRotation(0);
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(8, 12);
+    tft.println("MONITOR HIDRICO");
+    tft.println("INICIANDO...");
 
-    // Detección BME280
-    if (detectAndInitBME280()) {
-        Serial.printf("[OK] Sensor BME280 detectado en 0x%02X.\n", bmeAddress);
+    // Detección SHT30
+    if (detectAndInitSHT30()) {
+        Serial.printf("[OK] Sensor SHT30 detectado en 0x%02X.\n", sht30Address);
     } else {
-        Serial.println("[WARN] BME280 no detectado. Valores de respaldo.");
+        Serial.println("[WARN] SHT30 no detectado. Valores de respaldo.");
+    }
+
+    if (SD.begin(PIN_SD_CS, SPI)) {
+        sdMounted = true;
+        if (!SD.exists("/telemetry.csv")) {
+            File file = SD.open("/telemetry.csv", FILE_WRITE);
+            if (file) {
+                file.println("uptime_s,level_cm,level_pct,flow_l_min,drop_cm_h,temp_c,pressure_hpa,humidity_pct,eto_mm_day,risk");
+                file.close();
+            }
+        }
+        Serial.println("[OK] SD montada; persistencia CSV habilitada.");
+    } else {
+        Serial.println("[WARN] SD no disponible; se conserva SRAM como fuente de tiempo real.");
     }
 
     // Inicializar LittleFS
@@ -1242,13 +1494,10 @@ void setup() {
     Serial.println("[OK] Hash SHA-256 de credenciales calculado.");
 
     delay(1000);
-    lcd.clear();
+    tft.fillScreen(ILI9341_BLACK);
 
-    // WiFi: AP + STA
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("AguaSabana-Nodo", "sabana2026");
-    WiFi.begin("Wokwi-GUEST", "");
-    Serial.printf("[OK] SoftAP: AguaSabana-Nodo  IP: %s\n", WiFi.softAPIP().toString().c_str());
+    // Red Resiliente: Default STA con Fallback a SoftAP
+    initWiFiNetwork();
 
     // Configurar NTP para día juliano real
     configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
@@ -1259,6 +1508,7 @@ void setup() {
 
     // Mutex FreeRTOS
     telemetryMutex = xSemaphoreCreateMutex();
+    spiMutex = xSemaphoreCreateMutex();
 
     // Registro base de telemetría
     if (telemetryMutex != NULL) {
@@ -1268,7 +1518,7 @@ void setup() {
         latestRecord.flowLMin = 0.0f;
         latestRecord.dropRateCmH = 0.0f;
         latestRecord.tempC = 20.0f;
-        latestRecord.pressureHpa = 1013.25f;
+        latestRecord.pressureHpa = PRESSURE_UNAVAILABLE_HPA;
         latestRecord.humidityPct = 65.0f;
         latestRecord.etoMmDay = 3.8f;
         latestRecord.riskState = 0;
