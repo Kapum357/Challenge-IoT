@@ -57,8 +57,8 @@ constexpr int DAYLIGHT_OFFSET_SEC = 0;
 const char* NTP_SERVER = "pool.ntp.org";
 
 // Configuración de Red: Default STA con Fallback Dinámico a SoftAP
-const char* WIFI_STA_SSID = "Wokwi-GUEST";
-const char* WIFI_STA_PASS = "";
+const char* WIFI_STA_SSID = "Kapum A52";
+const char* WIFI_STA_PASS = "Ivanna<3";
 const char* WIFI_AP_SSID  = "AguaSabana-Nodo";
 const char* WIFI_AP_PASS  = "sabana2026";
 constexpr unsigned long WIFI_STA_TIMEOUT_MS = 10000;        // 10s ventana estricta de arranque
