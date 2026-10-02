@@ -11,10 +11,10 @@ namespace watermonitor {
 // Constantes físicas y de calibración para Sabana Centro (Escala MVP Laboratorio)
 // Challenge #2: Evolución con histéresis, detección de fugas y fail-safe
 // ============================================================================
-constexpr float TANK_HEIGHT_CM = 50.0f;  // Altura nominal de reservorio/recipiente en maqueta de laboratorio (cm)
-constexpr float LATITUDE_RAD = 0.08395f; // Latitud Sabana Centro (4.81° N en radianes)
-constexpr float FLOW_FACTOR = 7.5f;      // Factor de calibración YF-S201: F (Hz) = 7.5 * Q (L/min)
-constexpr size_t RING_BUFFER_CAPACITY = 360; // Capacidad de telemetría histórica en SRAM
+constexpr float TANK_HEIGHT_CM = 50.0f;         // Altura nominal de reservorio/recipiente en maqueta de laboratorio (cm)
+constexpr float LATITUDE_RAD = 0.08395f;        // Latitud Sabana Centro (4.81° N en radianes)
+constexpr float FLOW_FACTOR = 7.5f;             // Factor de calibración YF-S201: F (Hz) = 7.5 * Q (L/min)
+constexpr size_t RING_BUFFER_CAPACITY = 360;    // Capacidad de telemetría histórica en SRAM
 
 // Sentinel para indicar fallo de medición (eco inválido del HC-SR04)
 constexpr float LEVEL_SENSOR_ERROR = -1.0f;
@@ -30,9 +30,9 @@ struct TelemetryRecord {
     float levelPercent;   // Porcentaje de llenado (0 a 100%)
     float flowLMin;       // Caudal de descarga instantáneo (L/min)
     float dropRateCmH;    // Tasa de descenso de nivel (cm/h)
-    float tempC;          // Temperatura ambiente SHT30 (°C)
-    float pressureHpa;    // Presión no disponible con SHT30; -1.0 indica N/D
-    float humidityPct;    // Humedad relativa SHT30 (% HR)
+    float tempC;          // Temperatura ambiente BME280 (°C)
+    float pressureHpa;    // Presión barométrica BME280 (hPa); -1.0 indica N/D
+    float humidityPct;    // Humedad relativa BME280 (% HR)
     float etoMmDay;       // Evapotranspiración ETo Hargreaves-Samani (mm/día)
     uint8_t riskState;    // Estado de riesgo (0: NORMAL, 1: ESTRES, 2: ALERTA, 3: EMERGENCIA)
 };

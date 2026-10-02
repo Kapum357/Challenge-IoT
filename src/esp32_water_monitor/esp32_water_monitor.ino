@@ -6,7 +6,7 @@
 #include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
-#include <Adafruit_SHT31.h>
+#include <Adafruit_BME280.h>
 #include <LittleFS.h>
 #include <time.h>
 #include <mbedtls/sha256.h>
@@ -17,7 +17,7 @@
 // Sabana Centro, Cundinamarca - Latitud: 4.81° N (2,600 m.s.n.m.)
 // Challenge #2: Arquitectura Concurrente Dual-Core FreeRTOS (Core 0 / Core 1)
 //   + WebServer (Core 0) + Autenticación SHA-256 + LittleFS + NTP + Histéresis
-// Hardware: ESP32 DevKit v1 + HC-SR04 + SHT30 + ILI9341 SPI + SD + Buzzer + LEDs
+// Hardware: ESP32 DevKit v1 + HC-SR04 + BME280 + ILI9341 SPI + SD + Buzzer + LEDs
 // ============================================================================
 
 // Mapeo de Pines de Hardware
@@ -69,7 +69,7 @@ bool apFallbackActive = false;
 unsigned long lastStaRetryMillis = 0;
 
 // Instancias de Periféricos y Servidor Web Local en puerto 80 (Core 0)
-Adafruit_SHT31  sht30 = Adafruit_SHT31();
+Adafruit_BME280 bme;  // BME280: temperatura, humedad y presión barométrica vía I2C
 Adafruit_ILI9341 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 WebServer       server(80);
 
@@ -93,8 +93,8 @@ volatile unsigned long pulseCounter = 0;
 // Variables de Estado Compartido
 float currentFlowFactor = iot::watermonitor::FLOW_FACTOR;
 int manualRiskOverride = -1;
-bool sht30Available = false;
-uint8_t sht30Address = 0x44;
+bool bmeAvailable = false;
+uint8_t bmeAddress = 0x76;
 bool ntpSynced = false;
 bool echoSensorOk = true;
 bool littleFsMounted = false;
@@ -126,7 +126,7 @@ constexpr unsigned long SESSION_LIFETIME_MS = 900000; // 15 min
 char cliBuffer[64];
 uint8_t cliIndex = 0;
 
-// Estructura para intercambio sensor → analytics
+// Estructura y cola FreeRTOS para intercambio atómico sensor → analytics
 struct RawAcquisitionData {
     float ambientTempC;
     float pressureHpa;
@@ -134,7 +134,8 @@ struct RawAcquisitionData {
     float waterLevelCm;
     unsigned long pulses;
     float elapsedSec;
-} rawSensorData;
+};
+QueueHandle_t rawSensorQueue = NULL;
 
 // Hash SHA-256 pre-computado del password para comparación
 char storedPasswordHash[65] = {};
@@ -174,17 +175,16 @@ String generateSessionToken() {
 // Gestión de Sesiones
 // ============================================================================
 int findSession(const String& token) {
+    if (token.length() != 64) return -1;
     unsigned long now = millis();
     for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (sessions[i].active && strcmp(sessions[i].token, token.c_str()) == 0) {
-            if (now < sessions[i].expiresAt || (now - sessions[i].expiresAt) > 0x7FFFFFFFUL) {
-                // Renovar sesión en cada request
+        if (sessions[i].active && token.equals(sessions[i].token)) {
+            if ((long)(sessions[i].expiresAt - now) > 0) {
                 sessions[i].expiresAt = now + SESSION_LIFETIME_MS;
                 return i;
-            } else {
-                sessions[i].active = false;
-                return -1;
             }
+            sessions[i].active = false;
+            return -1;
         }
     }
     return -1;
@@ -193,7 +193,6 @@ int findSession(const String& token) {
 String createSession() {
     String token = generateSessionToken();
     unsigned long now = millis();
-    // Buscar slot libre o el más antiguo
     int slot = -1;
     unsigned long oldest = ULONG_MAX;
     for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -209,39 +208,17 @@ String createSession() {
     return token;
 }
 
-bool isValidSessionTokenFormat(const String& token) {
-    if (token.length() != 64) return false;
-    for (size_t i = 0; i < token.length(); i++) {
-        char c = token[i];
-        bool isHex = (c >= '0' && c <= '9') ||
-                     (c >= 'a' && c <= 'f') ||
-                     (c >= 'A' && c <= 'F');
-        if (!isHex) return false;
-    }
-    return true;
-}
-
 bool isAuthenticated() {
     if (!server.hasHeader("Cookie")) return false;
-
-    String cookieHeader = server.header("Cookie");
-    int start = 0;
-    while (start < cookieHeader.length()) {
-        int end = cookieHeader.indexOf(';', start);
-        if (end < 0) end = cookieHeader.length();
-
-        String pair = cookieHeader.substring(start, end);
-        pair.trim();
-        int equals = pair.indexOf('=');
-        if (equals > 0 && pair.substring(0, equals) == "session") {
-            String token = pair.substring(equals + 1);
-            token.trim();
-            return isValidSessionTokenFormat(token) && findSession(token) >= 0;
-        }
-        start = end + 1;
-    }
-    return false;
+    String cookie = server.header("Cookie");
+    int idx = cookie.indexOf("session=");
+    if (idx < 0) return false;
+    int end = cookie.indexOf(';', idx + 8);
+    String token = (end < 0) ? cookie.substring(idx + 8) : cookie.substring(idx + 8, end);
+    token.trim();
+    return findSession(token) >= 0;
 }
+
 
 // ============================================================================
 // Rutina de Servicio de Interrupción (ISR) - Caudalímetro Hall
@@ -275,21 +252,18 @@ void recoverI2CBus(int sdaPin, int sclPin) {
 }
 
 // ============================================================================
-// Detección de dirección I2C del SHT30 (0x44 / 0x45) con recuperación
+// Detección de dirección I2C del BME280 (0x76 / 0x77) con recuperación
 // ============================================================================
-bool detectAndInitSHT30() {
-    if (sht30.begin(0x44)) { sht30Address = 0x44; sht30Available = true; }
-    else if (sht30.begin(0x45)) { sht30Address = 0x45; sht30Available = true; }
+bool detectAndInitBME280() {
+    if (bme.begin(0x76, &Wire)) { bmeAddress = 0x76; bmeAvailable = true; }
+    else if (bme.begin(0x77, &Wire)) { bmeAddress = 0x77; bmeAvailable = true; }
     else {
         recoverI2CBus(I2C_SDA_PIN, I2C_SCL_PIN);
-        if (sht30.begin(0x44)) { sht30Address = 0x44; sht30Available = true; }
-        else if (sht30.begin(0x45)) { sht30Address = 0x45; sht30Available = true; }
-        else { sht30Available = false; }
+        if (bme.begin(0x76, &Wire)) { bmeAddress = 0x76; bmeAvailable = true; }
+        else if (bme.begin(0x77, &Wire)) { bmeAddress = 0x77; bmeAvailable = true; }
+        else { bmeAvailable = false; }
     }
-    if (sht30Available) {
-        sht30.heater(false);
-    }
-    return sht30Available;
+    return bmeAvailable;
 }
 
 void appendTelemetryToSd(const iot::watermonitor::TelemetryRecord& record) {
@@ -542,7 +516,7 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
 </head>
 <body>
 <h1>NODO IOT SABANA CENTRO</h1>
-<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; SHT30 + ILI9341 &bull; Histeresis</div>
+<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; BME280 + ILI9341 &bull; Histeresis</div>
 <div id="risk-badge" class="badge b-norm">ESTADO: NORMAL</div>
 <div class="grid">
   <div class="card" style="grid-column:span 2">
@@ -557,7 +531,7 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
     <div class="card-v"><span id="drop">--</span> <span class="unit">cm/h</span></div>
   </div>
   <div class="card">
-    <div class="card-t">Temperatura (SHT30)</div>
+    <div class="card-t">Temperatura (BME280)</div>
     <div class="card-v"><span id="temp">--</span> <span class="unit">&deg;C</span></div>
     <div class="card-t">Humedad Relativa</div>
     <div class="card-v"><span id="hum">--</span> <span class="unit">%HR</span></div>
@@ -573,7 +547,7 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
   <div class="card" style="grid-column:span 2">
     <div class="card-t">Diagn&oacute;stico y Salud de Hardware</div>
     <div style="display:flex;justify-content:space-between;font-size:0.75rem;padding-top:4px;flex-wrap:wrap;gap:6px">
-      <span>SHT30: <b id="hw-sht">--</b></span>
+      <span>BME280: <b id="hw-sht">--</b></span>
       <span>Eco US: <b id="hw-echo">--</b></span>
       <span>LittleFS: <b id="hw-fs">--</b></span>
       <span>SD: <b id="hw-sd">--</b></span>
@@ -836,7 +810,7 @@ void handleApiData() {
     uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
     bool staConnected = (WiFi.status() == WL_CONNECTED);
 
-    char json[576];
+    char json[768];
     snprintf(json, sizeof(json),
         "{\"level_cm\":%.2f,\"level_pct\":%.1f,\"flow_lmin\":%.2f,\"drop_rate\":%.2f,"
         "\"temp_c\":%.2f,\"pressure_hpa\":%.2f,\"humidity_pct\":%.2f,\"eto_mm_day\":%.2f,"
@@ -851,7 +825,7 @@ void handleApiData() {
         static_cast<unsigned long>(silenceRemainingSec),
         static_cast<unsigned long>(rec.uptimeSec),
         (ntpSynced ? "true" : "false"), hystState,
-        (sht30Available ? "true" : "false"),
+        (bmeAvailable ? "true" : "false"),
         (echoSensorOk ? "true" : "false"),
         (littleFsMounted ? "true" : "false"),
         (sdMounted ? "true" : "false"),
@@ -869,35 +843,32 @@ void handleApiHistory() {
         return;
     }
 
+    static iot::watermonitor::TelemetryRecord snapshot[iot::watermonitor::RING_BUFFER_CAPACITY];
+    size_t count = 0;
+    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        count = sramRingBuffer.size();
+        for (size_t i = 0; i < count; i++) {
+            sramRingBuffer.get(i, snapshot[i]);
+        }
+        xSemaphoreGive(telemetryMutex);
+    }
+
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "application/json", "");
     server.sendContent("{\"capacity\":360,\"records\":[");
 
-    size_t count = 0;
-    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        count = sramRingBuffer.size();
-        xSemaphoreGive(telemetryMutex);
+    for (size_t i = 0; i < count; i++) {
+        char itemJson[100];
+        snprintf(itemJson, sizeof(itemJson),
+            "%s{\"t\":%lu,\"l\":%.1f,\"lp\":%.0f,\"q\":%.1f,\"tc\":%.1f,\"h\":%.1f,\"p\":%.0f,\"r\":%u}",
+            (i > 0 ? "," : ""),
+            static_cast<unsigned long>(snapshot[i].uptimeSec),
+            snapshot[i].levelCm, snapshot[i].levelPercent,
+            snapshot[i].flowLMin, snapshot[i].tempC, snapshot[i].humidityPct, snapshot[i].pressureHpa, snapshot[i].riskState
+        );
+        server.sendContent(itemJson);
     }
 
-    for (size_t i = 0; i < count; i++) {
-        iot::watermonitor::TelemetryRecord item{};
-        bool gotRecord = false;
-        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            gotRecord = sramRingBuffer.get(i, item);
-            xSemaphoreGive(telemetryMutex);
-        }
-        if (gotRecord) {
-            char itemJson[100];
-            snprintf(itemJson, sizeof(itemJson),
-                "%s{\"t\":%lu,\"l\":%.1f,\"lp\":%.0f,\"q\":%.1f,\"tc\":%.1f,\"h\":%.1f,\"p\":%.0f,\"r\":%u}",
-                (i > 0 ? "," : ""),
-                static_cast<unsigned long>(item.uptimeSec),
-                item.levelCm, item.levelPercent,
-                item.flowLMin, item.tempC, item.humidityPct, item.pressureHpa, item.riskState
-            );
-            server.sendContent(itemJson);
-        }
-    }
     server.sendContent("]}");
     server.sendContent("");
 }
@@ -952,7 +923,7 @@ void Task_WebServer_HTTP(void* pvParameters) {
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: Adquisición de Sensores (HC-SR04, Hall, SHT30)
+// Tarea FreeRTOS Core 1: Adquisición de Sensores (HC-SR04, Hall, BME280)
 // ============================================================================
 void Task_SensorAcquisition(void* pvParameters) {
     (void)pvParameters;
@@ -960,9 +931,9 @@ void Task_SensorAcquisition(void* pvParameters) {
     float prevLevel = iot::watermonitor::TANK_HEIGHT_CM;
     float lastValidTempC = 20.0f;
     float lastValidHumidityPct = 65.0f;
+    float lastValidPressureHpa = PRESSURE_UNAVAILABLE_HPA;
     unsigned long lastAcqTime = millis();
-    unsigned long lastShtRetry = 0;
-    unsigned long lastSdPersist = 0;
+    unsigned long lastBmeRetry = 0;
 
     for (;;) {
         unsigned long now = millis();
@@ -976,25 +947,33 @@ void Task_SensorAcquisition(void* pvParameters) {
         pulseCounter = 0;
         portEXIT_CRITICAL(&flowMux);
 
-        // 2. Lectura SHT30 con reintento periódico. El SHT30 no mide presión.
+        // 2. Lectura BME280 con reintento periódico y protección contra congelamiento
         float ambientTempC = 20.0f;
         float pressureHpa = PRESSURE_UNAVAILABLE_HPA;
         float humidityPct = 65.0f;
 
-        if (sht30Available) {
-            ambientTempC = sht30.readTemperature();
-            humidityPct = sht30.readHumidity();
-            if (isnan(ambientTempC) || isnan(humidityPct)) {
+        if (bmeAvailable) {
+            ambientTempC = bme.readTemperature();
+            humidityPct = bme.readHumidity();
+            pressureHpa = bme.readPressure() / 100.0f; // Pa → hPa
+
+            // Si devuelve NaN o una temperatura absurda (fuera de rango físico -40 a 85 C)
+            if (isnan(ambientTempC) || isnan(humidityPct) || isnan(pressureHpa) || ambientTempC < -40.0f || ambientTempC > 85.0f) {
                 ambientTempC = lastValidTempC;
                 humidityPct = lastValidHumidityPct;
-                sht30Available = false;
+                pressureHpa = lastValidPressureHpa;
+                bmeAvailable = false;
+                lastBmeRetry = now; // Iniciar contador de reintento inmediato
             } else {
                 lastValidTempC = ambientTempC;
                 lastValidHumidityPct = humidityPct;
+                lastValidPressureHpa = pressureHpa;
             }
-        } else if (now - lastShtRetry > 30000) {
-            lastShtRetry = now;
-            detectAndInitSHT30();
+        } else if (now - lastBmeRetry > 3000) { // Reintentar cada 3 s en lugar de cada 30 s
+            lastBmeRetry = now;
+            if (detectAndInitBME280()) {
+                Serial.println("[OK] BME280 reconectado con éxito tras fallo.");
+            }
         }
 
         // 3. Medición de Nivel Acústico (Fail-Safe: mantiene último válido)
@@ -1011,17 +990,9 @@ void Task_SensorAcquisition(void* pvParameters) {
             tempMax24h = ambientTempC;
         }
 
-        // 5. Publicar datos crudos para Task_EdgeAnalytics
-        rawSensorData.ambientTempC = ambientTempC;
-        rawSensorData.pressureHpa = pressureHpa;
-        rawSensorData.humidityPct = humidityPct;
-        rawSensorData.waterLevelCm = currentLevel;
-        rawSensorData.pulses = pulses;
-        rawSensorData.elapsedSec = elapsedSec;
-
-        if (xAnalyticsTaskHandle != NULL) {
-            xTaskNotifyGive(xAnalyticsTaskHandle);
-        }
+        // 5. Publicar datos crudos para Task_EdgeAnalytics vía cola atómica (C1)
+        RawAcquisitionData raw{ambientTempC, pressureHpa, humidityPct, currentLevel, pulses, elapsedSec};
+        xQueueOverwrite(rawSensorQueue, &raw);
 
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
     }
@@ -1037,9 +1008,8 @@ void Task_EdgeAnalytics(void* pvParameters) {
     unsigned long lastSdPersist = 0;
 
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        RawAcquisitionData data = rawSensorData;
+        RawAcquisitionData data;
+        xQueueReceive(rawSensorQueue, &data, portMAX_DELAY);
 
         // 1. Caudal volumétrico
         float flowFactor = currentFlowFactor;
@@ -1063,14 +1033,7 @@ void Task_EdgeAnalytics(void* pvParameters) {
         // 4. Evaluación de Riesgo Instantáneo
         int rawRisk = iot::watermonitor::evaluateRisk(levelPercent, dropRateCmH, eto, flowLMin);
 
-        // 5. Histéresis Temporal (RiskStateMachine)
-        int stableRisk = 0;
-        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-            stableRisk = riskStateMachine.update(rawRisk);
-            xSemaphoreGive(telemetryMutex);
-        }
-
-        // 6. Empaquetar y almacenar en SramRingBuffer (con Mutex)
+        // 5. Empaquetar y almacenar con Histéresis Temporal (bajo Mutex único)
         iot::watermonitor::TelemetryRecord rec{};
         rec.uptimeSec = millis() / 1000;
         rec.levelCm = data.waterLevelCm;
@@ -1081,9 +1044,9 @@ void Task_EdgeAnalytics(void* pvParameters) {
         rec.pressureHpa = data.pressureHpa;
         rec.humidityPct = data.humidityPct;
         rec.etoMmDay = eto;
-        rec.riskState = static_cast<uint8_t>(stableRisk);
 
         if (xSemaphoreTake(telemetryMutex, portMAX_DELAY) == pdTRUE) {
+            rec.riskState = static_cast<uint8_t>(riskStateMachine.update(rawRisk));
             latestRecord = rec;
             sramRingBuffer.push(rec);
             xSemaphoreGive(telemetryMutex);
@@ -1163,13 +1126,13 @@ void renderTftStatusPage(int effectiveRisk, const iot::watermonitor::TelemetryRe
 
     tft.setTextSize(1);
     tft.setCursor(8, 270);
-    tft.print("SHT30: ");
-    tft.print(sht30Available ? "OK" : "N/A");
+    tft.print("BME280: ");
+    tft.print(bmeAvailable ? "OK" : "N/A");
     tft.print("  SD: ");
     tft.print(sdMounted ? "OK" : "N/A");
     tft.setCursor(8, 285);
     tft.print("Presion: ");
-    tft.print(rec.pressureHpa < 0 ? "N/D (SHT30)" : String(rec.pressureHpa, 1) + " hPa");
+    tft.print(rec.pressureHpa < 0 ? "N/D" : String(rec.pressureHpa, 1) + " hPa");
     tft.setCursor(8, 302);
     tft.printf("Uptime: %lu s", static_cast<unsigned long>(rec.uptimeSec));
     xSemaphoreGive(spiMutex);
@@ -1266,14 +1229,13 @@ void processCLICommand(char* cmd) {
         Serial.println("  CONSOLA DE SERVICIO - NODO IOT SABANA CENTRO (CH2)        ");
         Serial.println("------------------------------------------------------------");
         Serial.println("  help            : Muestra este menu de comandos");
-        Serial.println("  status          : Telemetria, memoria FreeRTOS y SHT30/SD");
+        Serial.println("  status          : Telemetria, memoria FreeRTOS y BME280/SD");
         Serial.println("  test <0-3>      : Fuerza estado de riesgo");
         Serial.println("  auto            : Retorna al modo automatico");
         Serial.println("  silence <seg>   : Silencia buzzer por N segundos");
         Serial.println("  unsilence       : Reactiva buzzer inmediatamente");
         Serial.println("  flow <factor>   : Ajustar factor caudalimetro");
         Serial.println("  ntp             : Muestra estado NTP y dia juliano");
-        Serial.println("  hysteresis      : Muestra estado de maquina de histeresis");
         Serial.println("  wifi            : Diagnostico de red (STA / Fallback SoftAP)");
         Serial.println("------------------------------------------------------------");
     }
@@ -1290,9 +1252,9 @@ void processCLICommand(char* cmd) {
         Serial.printf("[STATUS] Riesgo: %s (%d)  Override: %d  Silenciado: %s\n",
                       iot::watermonitor::riskLabel(rec.riskState), rec.riskState,
                       manualRiskOverride, isAlarmSilenced ? "SI" : "NO");
-        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  SHT30: %s (0x%02X)  SD: %s\n",
+        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  BME280: %s (0x%02X)  SD: %s\n",
                       (int)sramRingBuffer.size(), (int)sramRingBuffer.capacity(),
-                      rec.uptimeSec, sht30Available ? "OK" : "N/A", sht30Address,
+                      rec.uptimeSec, bmeAvailable ? "OK" : "N/A", bmeAddress,
                       sdMounted ? "OK" : "N/A");
         Serial.printf("[STATUS] Heap libre: %d bytes  NTP: %s  Dia: %d\n",
                       ESP.getFreeHeap(), ntpSynced ? "Sincronizado" : "Fallback", getDayOfYear());
@@ -1418,7 +1380,7 @@ void setup() {
     Serial.println("\n========================================================");
     Serial.println(" NODO IOT SABANA CENTRO - CHALLENGE #2                  ");
     Serial.println(" Arquitectura Dual-Core FreeRTOS + WebServer (Core 0)  ");
-    Serial.println(" SHT30 + ILI9341 + SD + Histeresis + Auth SHA-256 + NTP ");
+    Serial.println(" BME280 + ILI9341 + SD + Histeresis + Auth SHA-256 + NTP");
     Serial.println("========================================================");
 
     // Configuración de Pines GPIO
@@ -1448,6 +1410,7 @@ void setup() {
     // Inicialización de buses
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(100000);
+    Wire.setTimeOut(25);    // Timeout de 25 ms para evitar cuelgues de bus
     SPI.begin(PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
 
     tft.begin();
@@ -1459,11 +1422,11 @@ void setup() {
     tft.println("MONITOR HIDRICO");
     tft.println("INICIANDO...");
 
-    // Detección SHT30
-    if (detectAndInitSHT30()) {
-        Serial.printf("[OK] Sensor SHT30 detectado en 0x%02X.\n", sht30Address);
+    // Detección BME280
+    if (detectAndInitBME280()) {
+        Serial.printf("[OK] Sensor BME280 detectado en 0x%02X.\n", bmeAddress);
     } else {
-        Serial.println("[WARN] SHT30 no detectado. Valores de respaldo.");
+        Serial.println("[WARN] BME280 no detectado. Valores de respaldo.");
     }
 
     if (SD.begin(PIN_SD_CS, SPI)) {
@@ -1506,9 +1469,10 @@ void setup() {
     // Inicializar ventana térmica 24h
     lastTempResetMillis = millis();
 
-    // Mutex FreeRTOS
+    // Primitivas de sincronización FreeRTOS (Mutex y Cola de Sensores)
     telemetryMutex = xSemaphoreCreateMutex();
     spiMutex = xSemaphoreCreateMutex();
+    rawSensorQueue = xQueueCreate(1, sizeof(RawAcquisitionData));
 
     // Registro base de telemetría
     if (telemetryMutex != NULL) {

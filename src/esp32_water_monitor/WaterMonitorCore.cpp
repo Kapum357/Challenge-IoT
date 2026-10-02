@@ -45,29 +45,17 @@ void SramRingBuffer::clear() {
 }
 
 bool SramRingBuffer::get(size_t index, TelemetryRecord& outRecord) const {
-    if (index >= count_) {
-        return false;
-    }
-
-    size_t actualIndex = 0;
-    if (count_ < CAPACITY) {
-        actualIndex = index;
-    } else {
-        actualIndex = (head_ + index) % CAPACITY;
-    }
-
-    outRecord = buffer_[actualIndex];
+    if (index >= count_) return false;
+    outRecord = buffer_[(count_ < CAPACITY) ? index : (head_ + index) % CAPACITY];
     return true;
 }
 
 bool SramRingBuffer::getLatest(TelemetryRecord& outRecord) const {
-    if (count_ == 0) {
-        return false;
-    }
-    size_t latestIndex = (head_ + CAPACITY - 1) % CAPACITY;
-    outRecord = buffer_[latestIndex];
+    if (count_ == 0) return false;
+    outRecord = buffer_[(head_ + CAPACITY - 1) % CAPACITY];
     return true;
 }
+
 
 // ============================================================================
 // Implementación de RiskStateMachine (Histéresis Temporal)

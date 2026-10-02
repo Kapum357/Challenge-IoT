@@ -6,7 +6,7 @@
 Nodo IoT de procesamiento en el borde (*Edge Computing*) concebido como una solución de ultra bajo costo (**BOM optimizado de $24.00 USD**, donde el ESP32 a **$4.50 USD** se preserva rigurosamente como el componente individual más costoso del sistema) para la detección temprana de riesgo hídrico, sequía y balance hidrometeorológico en reservorios y acueductos veredales de la provincia de Sabana Centro, Cundinamarca (Latitud 4.81° N, 2,600 m.s.n.m.), en el marco de la crisis climática por el Fenómeno de El Niño.
 
 El sistema opera con **100% de autonomía in-situ (cero costos mensuales de conectividad o infraestructura cloud)** mediante una **arquitectura concurrente dual-core sobre FreeRTOS**:
-1. **Compensación termo-acústica dinámica**: Corrección del tiempo de vuelo ultrasónico (HC-SR04) en función de la temperatura y humedad ambiental leídas por el sensor **SHT30** vía I2C. Modo *fail-safe* que emite centinela de error en eco inválido en lugar de asumir tanque lleno. El SHT30 no proporciona presión; ese campo se reporta como no disponible.
+1. **Compensación termo-acústica dinámica**: Corrección del tiempo de vuelo ultrasónico (HC-SR04) en función de la temperatura ambiental leída por el sensor **BME280** vía I2C. Modo *fail-safe* que emite centinela de error en eco inválido en lugar de asumir tanque lleno. El BME280 proporciona además medición barométrica real (hPa) y humedad relativa (% HR).
 2. **Cuantificación volumétrica de caudal**: Detección de pulsos de turbina Hall (YF-S201) mediante interrupciones de hardware (`IRAM_ATTR flowPulseISR`) protegidas por spinlock dual-core (`portMUX_TYPE`).
 3. **Cálculo astronómico de Evapotranspiración ($ET_0$)**: Modelo de Hargreaves-Samani parametrizado para la radiación extraterrestre ($R_a$) y latitud de Sabana Centro.
 4. **Matriz de Fusión Multisensorial de Riesgo con Histéresis**: Clasificación autónoma en 4 estados operativos (0: Normal, 1: Estrés Moderado, 2: Alerta Severa, 3: Emergencia Crítica) filtrados por `RiskStateMachine` (3 muestras consecutivas para escalar, 5 para des-escalar).
@@ -25,7 +25,7 @@ El sistema opera con **100% de autonomía in-situ (cero costos mensuales de cone
   * `test_water_monitor.cpp`: Suite de pruebas unitarias exhaustiva (12 bloques temáticos, 81 aserciones cubriendo verificación matemática, empaquetado de estructuras, wrap-around del ring buffer, histéresis y filtros de seguridad).
   * `Makefile`: Automatización de compilación con `g++` (`-Wall -Wextra -pedantic`) y ejecución local de tests.
 * `wokwi/`:
-  * `diagram.json`: Configuración del circuito en simulador Wokwi (ESP32 DevKit v1, HC-SR04, SHT30 I2C, ILI9341 SPI, microSD, LEDs, Buzzer y Pulsador Hall).
+  * `diagram.json`: Configuración del circuito en simulador Wokwi (ESP32 DevKit v1, HC-SR04, BME280 I2C, ILI9341 SPI, microSD, LEDs, Buzzer y Pulsador Hall).
   * `wokwi.toml`: Configuración de enlace a binarios de firmware.
 * `Challenge.wiki/`: Documentación técnica formal completa con Registros de Decisiones de Arquitectura (ADR), Business Model Canvas, diagramas UML y normas IEEE.
 
@@ -48,10 +48,10 @@ g++ -std=c++17 -Wall -Wextra -pedantic WaterMonitorCore.cpp test_water_monitor.c
 ### 2. Simulación Interactiva en Wokwi y Operación In-Situ
 1. Abrir [Wokwi](https://wokwi.com/) e importar la carpeta `wokwi/` junto con el código del firmware `src/esp32_water_monitor/`.
 2. Iniciar la simulación interactiva:
-   * Variar el sensor **SHT30** para alterar temperatura o humedad relativa (% HR).
+   * Variar el sensor **BME280** para alterar temperatura, presión (hPa) o humedad relativa (% HR).
    * Mover la distancia del sensor ultrasónico HC-SR04 para simular fluctuaciones en el nivel del agua.
    * Pulsar el botón azul (*Flow Pulse*) en GPIO 14 para inyectar pulsos de caudal volumétrico.
-   * **Lectura del Display ILI9341 (Página Única Fija)**: IP/AP, riesgo, buzzer, nivel, porcentaje, caudal, descenso, temperatura, humedad, ETo, estado SHT30/SD y uptime.
+   * **Lectura del Display ILI9341 (Página Única Fija)**: IP/AP, riesgo, buzzer, nivel, porcentaje, caudal, descenso, temperatura, humedad, presión, ETo, estado BME280/SD y uptime.
    * Comprobar la respuesta óptica y acústica en los LEDs tricolor y buzzer piezoeléctrico.
 
 ### 3. Conexión Inalámbrica Resiliente (Default STA con Fallback Dinámico a SoftAP)
@@ -62,7 +62,7 @@ El nodo opera bajo una política de resiliencia de red de dos niveles, optimizad
 * **Acceso desde Celular o PC**: Abrir el navegador en `http://192.168.4.1` (en modo AP) o en la IP asignada por DHCP (en modo STA, reportada en la pantalla ILI9341).
 * **Características del SPA Dashboard**:
   * **Gráfica Interactiva en HTML5 Canvas Puro**: Dibuja la serie temporal de nivel y humedad relativa a partir de los 360 registros en SRAM de `/api/history` sin depender de CDNs externas.
-  * **Telemetría en Vivo (1 Hz vía AJAX `/api/data`)**: Nivel, porcentaje, caudal instantáneo, descenso, temperatura, humedad relativa SHT30, presión no disponible, $ET_0$ y estado de red (`wifi_sta`, `ap_fallback`).
+  * **Telemetría en Vivo (1 Hz vía AJAX `/api/data`)**: Nivel, porcentaje, caudal instantáneo, descenso, temperatura, humedad relativa, presión barométrica BME280 (hPa), $ET_0$ y estado de red (`wifi_sta`, `ap_fallback`).
   * **Seguridad Perimetral y Autenticación**:
     * Filtro estricto de subred: únicamente se aceptan clientes pertenecientes a la subred de la interfaz activa (`192.168.4.0/24` en SoftAP o subred local autorizada en STA); peticiones de otras redes reciben `403 Forbidden`.
     * Formulario de inicio de sesión (`/login`): autenticación con usuario `admin` y contraseña `sabana2026`, validada mediante SHA-256 con salt (`mbedtls`).
@@ -72,7 +72,7 @@ El nodo opera bajo una política de resiliencia de red de dos niveles, optimizad
 ### 4. Consola de Servicio Embebida (UART0 @ 115200 baud)
 Comandos implementados en el monitor serie (`SabanaNode>`):
 * `help`: Menú interactivo de comandos disponibles.
-* `status`: Diagnóstico completo de telemetría, memoria FreeRTOS, estado del SHT30/SD y buffer histórico en SRAM.
+* `status`: Diagnóstico completo de telemetría, memoria FreeRTOS, estado del BME280/SD y buffer histórico en SRAM.
 * `wifi`: Diagnóstico detallado de red (modo de operación, IP, máscara, gateway, RSSI y estado de fallback SoftAP).
 * `test <0-3>`: Forzado manual de estados de riesgo (0: Normal, 1: Estrés, 2: Alerta, 3: Emergencia).
 * `auto`: Retorno al modo automático de fusión sensorial.
@@ -93,7 +93,7 @@ Comandos implementados en el monitor serie (`SabanaNode>`):
 | :--- | :--- | :--- | :--- |
 | **ESP32-WROOM-32 DevKit v1** | Dual Core Xtensa LX6 @ 240 MHz | **Unidad Central y Componente Más Costoso** | **$4.50 USD** (18.75% BOM) |
 | **Sensor de Caudal Hall** | YF-S201 (Rotor de turbina) | Cuantificación volumétrica de descarga | **$3.50 USD** |
-| **Sensor Termo-Higrométrico** | **SHT30 I2C (0x44/0x45)** | **Temperatura y Humedad Relativa** | **$2.50 USD** |
+| **Sensor Termo-Higro-Barométrico** | **BME280 I2C (0x76/0x77)** | **Temperatura, Humedad Relativa y Presión Barométrica** | **$2.80 USD** |
 | **Display TFT** | **ILI9341 SPI, 240x320, RGB565, sin táctil** | Interfaz HMI local autónoma in-situ | **$6.00 USD** |
 | **Sensor Ultrasónico de Nivel** | HC-SR04 con laca antihumedad | Medición de nivel con corrección acústica | **$2.20 USD** |
 | **Fuente de Alimentación** | Adaptador USB 5V 2A para caseta | Alimentación continua 5V DC | **$2.00 USD** |
@@ -110,7 +110,7 @@ Comandos implementados en el monitor serie (`SabanaNode>`):
 | **HC-SR04** | Trigger | **GPIO 4** | Salida Digital | 3.3V CMOS | Disparo pulso 10 $\mu$s; GPIO18 queda para VSPI SCK |
 | **HC-SR04** | Echo | **GPIO 34** | Entrada Digital solo-entrada | 5V $\rightarrow$ 3.3V | Divisor resistivo obligatorio |
 | **Sensor Hall YF-S201** | Señal | **GPIO 14** | Interrupción Externa | 5V $\rightarrow$ 3.3V | Pull-up 10k $\Omega$ + divisor $R_3=1.0\text{ k}\Omega, R_4=2.0\text{ k}\Omega$ |
-| **SHT30** | SDA / SCL | **GPIO 21 / 22** | Bus I2C (0x44 / 0x45) | 3.3V I2C | Detección dual y recuperación de bus |
+| **BME280** | SDA / SCL | **GPIO 21 / 22** | Bus I2C (0x76 / 0x77) | 3.3V I2C | Detección dual y recuperación de bus |
 | **ILI9341** | SCK / MISO / MOSI | **GPIO 18 / 19 / 23** | VSPI compartido | 3.3V | RGB565; MISO también alimenta SD |
 | **ILI9341** | CS / DC / RST / BL | **GPIO 5 / 16 / 17 / 32** | Control SPI | 3.3V | Sin panel táctil |
 | **microSD** | CS | **GPIO 13** | VSPI compartido | 3.3V | Persistencia CSV; SRAM conserva tiempo real |
