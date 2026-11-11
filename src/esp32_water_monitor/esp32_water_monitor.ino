@@ -3,11 +3,12 @@
 #include <SPI.h>
 #include <SD.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <WebServer.h>
+#include <PubSubClient.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <Adafruit_BME280.h>
-#include <LittleFS.h>
 #include <time.h>
 #include <mbedtls/sha256.h>
 #include "WaterMonitorCore.h"
@@ -16,14 +17,16 @@
 // SISTEMA IOT DE BORDE: MONITOREO HIDROMETEOROLÓGICO Y ALERTA TEMPRANA
 // Sabana Centro, Cundinamarca - Latitud: 4.81° N (2,600 m.s.n.m.)
 // Challenge #2: Arquitectura Concurrente Dual-Core FreeRTOS (Core 0 / Core 1)
-//   + WebServer (Core 0) + Autenticación SHA-256 + LittleFS + NTP + Histéresis
+//   + WebServer (Core 0) + Autenticación SHA-256 + NTP + Histéresis
 // Hardware: ESP32 DevKit v1 + HC-SR04 + BME280 + ILI9341 SPI + SD + Buzzer + LEDs
 // ============================================================================
 
 // Mapeo de Pines de Hardware
 #define PIN_TRIG        4
 #define PIN_ECHO        34
+#if ENABLE_FLOW_SENSOR
 #define PIN_FLOW_HALL   14
+#endif
 #define PIN_BUZZER      27
 #define PIN_LED_RED     25
 #define PIN_LED_GREEN   26
@@ -47,9 +50,8 @@ constexpr float PRESSURE_UNAVAILABLE_HPA = -1.0f;
 
 // Credenciales de Autenticación (SHA-256 hash de "sabana2026" con salt "SabanaCentro")
 const char* AUTH_USERNAME = "admin";
-// Pre-computed: SHA256("SabanaCentro" + "sabana2026") — se verifica en runtime
 const char* AUTH_SALT = "SabanaCentro";
-const char* AUTH_PASSWORD_HASH = ""; // Se calcula al arrancar para comparación
+const char* AUTH_PASSWORD_HASH = ""; 
 
 // NTP para Día Juliano Real
 constexpr long GMT_OFFSET_SEC = -5 * 3600; // UTC-5 Colombia
@@ -62,6 +64,25 @@ const char* WIFI_STA_PASS = "Ivanna<3";
 const char* WIFI_AP_SSID  = "AguaSabana-Nodo";
 const char* WIFI_AP_PASS  = "sabana2026";
 constexpr unsigned long WIFI_STA_TIMEOUT_MS = 10000;        // 10s ventana estricta de arranque
+
+// Configuración MQTT: Árbol de tópicos agua/<nodo_id>/... hacia el Gateway Raspberry Pi
+// Credenciales de broker Mosquitto cargadas por build flag (-D), nunca en texto plano en VCS.
+#ifndef MQTT_NODE_ID
+#define MQTT_NODE_ID "nodo01"
+#endif
+#ifndef MQTT_BROKER_HOST
+#define MQTT_BROKER_HOST "192.168.25.1"
+#endif
+#ifndef MQTT_BROKER_PORT
+#define MQTT_BROKER_PORT 1883
+#endif
+#ifndef MQTT_USERNAME
+#define MQTT_USERNAME ""
+#endif
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD ""
+#endif
+constexpr unsigned long MQTT_TELEMETRY_PERIOD_MS = 5000;   // Publicacion a Mosquitto cada 5 s
 constexpr unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000; // 15s intervalo de reintento en Core 0
 
 // Estado de Conectividad Wi-Fi
@@ -69,18 +90,37 @@ bool apFallbackActive = false;
 unsigned long lastStaRetryMillis = 0;
 
 // Instancias de Periféricos y Servidor Web Local en puerto 80 (Core 0)
-Adafruit_BME280 bme;  // BME280: temperatura, humedad y presión barométrica vía I2C
+Adafruit_BME280 bme;
 Adafruit_ILI9341 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 WebServer       server(80);
 
 // Sincronización y Primitivas FreeRTOS
+#if ENABLE_FLOW_SENSOR
 static portMUX_TYPE flowMux = portMUX_INITIALIZER_UNLOCKED;
+#endif
 SemaphoreHandle_t telemetryMutex = NULL;
 SemaphoreHandle_t spiMutex = NULL;
 TaskHandle_t xWebServerTaskHandle = NULL;
 TaskHandle_t xSensorTaskHandle = NULL;
 TaskHandle_t xAnalyticsTaskHandle = NULL;
 TaskHandle_t xHmiTaskHandle = NULL;
+TaskHandle_t xMqttTaskHandle = NULL;
+
+// Cliente MQTT (PubSubClient en tarea dedicada, LWT retenido)
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
+char mqttClientId[32] = {};
+char topicTelemetria[48] = {};
+char topicAlerta[48] = {};
+char topicEstado[48] = {};
+char topicComando[48] = {};
+char topicConfirmacion[48] = {};
+struct AckMsg {
+    char reqId[32];
+    char source[12];
+    bool muted;
+};
+QueueHandle_t mqttAckQueue = NULL;  // PubSubClient no es thread-safe: solo la tarea MQTT publica
 
 // Buffer Circular en SRAM de 360 Muestras + Máquina de Histéresis
 iot::watermonitor::SramRingBuffer sramRingBuffer;
@@ -88,18 +128,18 @@ iot::watermonitor::TelemetryRecord latestRecord{};
 iot::watermonitor::RiskStateMachine riskStateMachine;
 
 // Variables Volátiles de Interrupción
+#if ENABLE_FLOW_SENSOR
 volatile unsigned long pulseCounter = 0;
+float currentFlowFactor = iot::watermonitor::FLOW_FACTOR;
+#endif
 
 // Variables de Estado Compartido
-float currentFlowFactor = iot::watermonitor::FLOW_FACTOR;
 int manualRiskOverride = -1;
 bool bmeAvailable = false;
 uint8_t bmeAddress = 0x76;
 bool ntpSynced = false;
 bool echoSensorOk = true;
-bool littleFsMounted = false;
 bool sdMounted = false;
-File telemetryLog;
 
 // Perro Guardián de Silenciamiento Remoto
 bool isAlarmSilenced = false;
@@ -107,20 +147,20 @@ unsigned long silenceStartMillis = 0;
 unsigned long silenceDurationMillis = 0;
 
 // Ventana Térmica 24h para Hargreaves-Samani (Tmax/Tmin reales)
-float tempMin24h = 100.0f;   // Se inicializa alto para que la primera lectura lo establezca
-float tempMax24h = -100.0f;  // Se inicializa bajo para que la primera lectura lo establezca
+float tempMin24h = 100.0f;
+float tempMax24h = -100.0f;
 unsigned long lastTempResetMillis = 0;
-constexpr unsigned long TEMP_WINDOW_MS = 86400000UL; // 24h en ms
+constexpr unsigned long TEMP_WINDOW_MS = 86400000UL;
 
 // Autenticación: Sesión activa (máx 4 simultáneas)
 struct SessionEntry {
-    char token[65]; // SHA-256 hex = 64 chars + null
-    unsigned long expiresAt; // millis() de expiración
+    char token[65];
+    unsigned long expiresAt;
     bool active;
 };
 constexpr int MAX_SESSIONS = 4;
 SessionEntry sessions[MAX_SESSIONS] = {};
-constexpr unsigned long SESSION_LIFETIME_MS = 900000; // 15 min
+constexpr unsigned long SESSION_LIFETIME_MS = 900000;
 
 // Consola Serial CLI
 char cliBuffer[64];
@@ -137,17 +177,16 @@ struct RawAcquisitionData {
 };
 QueueHandle_t rawSensorQueue = NULL;
 
-// Hash SHA-256 pre-computado del password para comparación
 char storedPasswordHash[65] = {};
 
 // ============================================================================
-// Utilidades de Criptografía (mbedTLS ya incluido en ESP-IDF)
+// Utilidades de Criptografía
 // ============================================================================
 void sha256Hex(const char* input, size_t len, char* output) {
     uint8_t hash[32];
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256
+    mbedtls_sha256_starts(&ctx, 0);
     mbedtls_sha256_update(&ctx, (const unsigned char*)input, len);
     mbedtls_sha256_finish(&ctx, hash);
     mbedtls_sha256_free(&ctx);
@@ -171,9 +210,6 @@ String generateSessionToken() {
     return String(token);
 }
 
-// ============================================================================
-// Gestión de Sesiones
-// ============================================================================
 int findSession(const String& token) {
     if (token.length() != 64) return -1;
     unsigned long now = millis();
@@ -219,19 +255,14 @@ bool isAuthenticated() {
     return findSession(token) >= 0;
 }
 
-
-// ============================================================================
-// Rutina de Servicio de Interrupción (ISR) - Caudalímetro Hall
-// ============================================================================
+#if ENABLE_FLOW_SENSOR
 void IRAM_ATTR flowPulseISR() {
     portENTER_CRITICAL_ISR(&flowMux);
     pulseCounter++;
     portEXIT_CRITICAL_ISR(&flowMux);
 }
+#endif
 
-// ============================================================================
-// Recuperación Canónica del Bus I2C (9 Ciclos de Reloj SCL)
-// ============================================================================
 void recoverI2CBus(int sdaPin, int sclPin) {
     Wire.end();
     pinMode(sdaPin, INPUT_PULLUP);
@@ -251,9 +282,6 @@ void recoverI2CBus(int sdaPin, int sclPin) {
     Wire.setClock(100000);
 }
 
-// ============================================================================
-// Detección de dirección I2C del BME280 (0x76 / 0x77) con recuperación
-// ============================================================================
 bool detectAndInitBME280() {
     if (bme.begin(0x76, &Wire)) { bmeAddress = 0x76; bmeAvailable = true; }
     else if (bme.begin(0x77, &Wire)) { bmeAddress = 0x77; bmeAvailable = true; }
@@ -278,18 +306,19 @@ void appendTelemetryToSd(const iot::watermonitor::TelemetryRecord& record) {
         xSemaphoreGive(spiMutex);
         return;
     }
+    float flowVal = 0.0f;
+#if ENABLE_FLOW_SENSOR
+    flowVal = record.flowLMin;
+#endif
     file.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u\n",
                 static_cast<unsigned long>(record.uptimeSec),
-                record.levelCm, record.levelPercent, record.flowLMin,
+                record.levelCm, record.levelPercent, flowVal,
                 record.dropRateCmH, record.tempC, record.pressureHpa,
                 record.humidityPct, record.etoMmDay, record.riskState);
     file.close();
     xSemaphoreGive(spiMutex);
 }
 
-// ============================================================================
-// Medición de Nivel Ultrasónico con Compensación Termo-Acústica (Fail-Safe)
-// ============================================================================
 float readAcousticLevel(float ambientTempC, float previousLevelCm) {
     digitalWrite(PIN_TRIG, LOW); delayMicroseconds(2);
     digitalWrite(PIN_TRIG, HIGH); delayMicroseconds(10);
@@ -298,7 +327,6 @@ float readAcousticLevel(float ambientTempC, float previousLevelCm) {
     long durationUs = pulseIn(PIN_ECHO, HIGH, 25000L);
     float measured = iot::watermonitor::measureCorrectedLevel(ambientTempC, durationUs);
 
-    // CORRECCIÓN Ch2: Fail-safe — eco inválido mantiene último valor válido y reporta estado
     if (measured < 0.0f) {
         echoSensorOk = false;
         return previousLevelCm;
@@ -307,22 +335,16 @@ float readAcousticLevel(float ambientTempC, float previousLevelCm) {
     return measured;
 }
 
-// ============================================================================
-// Obtener Día del Año Real (NTP) o Fallback
-// ============================================================================
 int getDayOfYear() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 100)) {
         ntpSynced = true;
-        return timeinfo.tm_yday + 1; // tm_yday es 0-based
+        return timeinfo.tm_yday + 1;
     }
     ntpSynced = false;
-    return 180; // Fallback si NTP no está disponible
+    return 180;
 }
 
-// ============================================================================
-// Inicialización Resiliente de Red: Default STA con Fallback a SoftAP
-// ============================================================================
 void initWiFiNetwork() {
     Serial.println("\n[WIFI] Modo Default: STA. Intentando conexion a infraestructura...");
     Serial.printf("[WIFI] SSID: '%s' (Timeout estricto: %lu s)...\n",
@@ -363,9 +385,8 @@ void initWiFiNetwork() {
         tft.println("WiFi: STA");
         tft.setTextColor(ILI9341_WHITE);
         tft.println(WiFi.localIP());
-        delay(1200);
+        delay(1000);
     } else {
-        // Falla estricta: Timeout agotado
         apFallbackActive = true;
         Serial.println("[WARN] Falla estricta: Timeout de conexion STA agotado.");
         Serial.printf("[WARN] Activando Fallback SoftAP: '%s'...\n", WIFI_AP_SSID);
@@ -383,20 +404,15 @@ void initWiFiNetwork() {
         tft.println("WiFi: SoftAP");
         tft.setTextColor(ILI9341_WHITE);
         tft.println(WiFi.softAPIP());
-        delay(1200);
+        delay(1000);
     }
 }
 
-// ============================================================================
-// Supervisión Dinámica de Red (Ejecutada periódicamente en Core 0)
-// ============================================================================
 void manageWiFiConnectivity() {
     static unsigned long lastCheckMillis = 0;
     unsigned long now = millis();
 
-    if (now - lastCheckMillis < 2000) {
-        return;
-    }
+    if (now - lastCheckMillis < 2000) return;
     lastCheckMillis = now;
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -414,8 +430,6 @@ void manageWiFiConnectivity() {
             Serial.println("\n[WARN] Perdida de enlace STA. Activando Fallback SoftAP dinamicamente...");
             WiFi.mode(WIFI_AP_STA);
             WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
-            Serial.printf("[OK] SoftAP Fallback activo: %s  IP: %s\n",
-                          WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
             lastStaRetryMillis = now;
         } else if (now - lastStaRetryMillis >= WIFI_RECONNECT_INTERVAL_MS) {
             lastStaRetryMillis = now;
@@ -426,36 +440,33 @@ void manageWiFiConnectivity() {
 }
 
 // ============================================================================
-// Single Page Application (SPA) Web Dashboard en PROGMEM
-// Con Autenticación por Sesión, Gráficas Interactivas HTML5 Canvas
+// Dashboard Web (SPA PROGMEM)
 // ============================================================================
 const char HTML_LOGIN[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Login - Nodo IoT Sabana Centro</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login - Nodo IoT</title>
 <style>
-:root{--bg:#070d1e;--card:#131c36;--border:#263556;--text:#f1f5f9;--sub:#94a3b8;--green:#10b981}
-*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif}
-body{background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-box{background:var(--card);padding:32px;border-radius:12px;border:1px solid var(--border);width:320px}
-h2{text-align:center;margin-bottom:20px;font-size:1.1rem}
-.sub{text-align:center;font-size:0.75rem;color:var(--sub);margin-bottom:16px}
-input{width:100%;padding:10px;margin-bottom:12px;background:#1e293b;border:1px solid var(--border);color:#fff;border-radius:6px;font-size:0.9rem}
-button{width:100%;padding:10px;background:var(--green);color:#fff;border:none;border-radius:6px;font-size:0.95rem;font-weight:600;cursor:pointer}
-button:active{transform:scale(0.97)}
-.err{color:#ef4444;font-size:0.8rem;text-align:center;margin-top:8px;display:none}
+:root{--bg:#070d1e;--card:#131c36;--b:#263556;--t:#f1f5f9;--sub:#94a3b8;--g:#10b981}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--t);display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:var(--card);padding:28px;border-radius:12px;border:1px solid var(--b);width:310px;text-align:center}
+h2{font-size:1.1rem;margin-bottom:6px}.sub{font-size:.75rem;color:var(--sub);margin-bottom:16px}
+input{width:100%;padding:10px;margin-bottom:10px;background:#1e293b;border:1px solid var(--b);color:#fff;border-radius:6px;font-size:.9rem}
+button{width:100%;padding:10px;background:var(--g);color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer}
+button:active{transform:scale(.97)}
+.err{color:#ef4444;font-size:.8rem;margin-top:10px;display:none}
 </style>
 </head>
 <body>
-<div class="login-box">
+<div class="box">
   <h2>NODO IOT SABANA CENTRO</h2>
-  <div class="sub">Autenticacion Requerida &bull; WLAN Municipal</div>
-  <form id="lf" onsubmit="return doLogin(event)">
-    <input type="text" id="user" placeholder="Usuario" autocomplete="username" required>
-    <input type="password" id="pass" placeholder="Contrasena" autocomplete="current-password" required>
+  <div class="sub">Autenticación &bull; WLAN Municipal</div>
+  <form onsubmit="return doLogin(event)">
+    <input type="text" id="u" placeholder="Usuario" autocomplete="username" required>
+    <input type="password" id="p" placeholder="Contraseña" autocomplete="current-password" required>
     <button type="submit">Ingresar</button>
   </form>
   <div id="err" class="err">Credenciales incorrectas</div>
@@ -464,8 +475,8 @@ button:active{transform:scale(0.97)}
 async function doLogin(e){
   e.preventDefault();
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({user:document.getElementById('user').value,pass:document.getElementById('pass').value})});
-  if(r.ok){location.href='/';}else{document.getElementById('err').style.display='block';}
+    body:JSON.stringify({user:document.getElementById('u').value,pass:document.getElementById('p').value})});
+  if(r.ok)location.href='/';else document.getElementById('err').style.display='block';
   return false;
 }
 </script>
@@ -477,46 +488,40 @@ const char HTML_SPA_INDEX[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Nodo IoT Sabana Centro - Ch2</title>
 <style>
-:root{--bg:#070d1e;--card:#131c36;--border:#263556;--text:#f1f5f9;--sub:#94a3b8;--green:#10b981;--blue:#38bdf8;--yellow:#f59e0b;--red:#ef4444;--teal:#14b8a6}
-*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif}
-body{background:var(--bg);color:var(--text);padding:12px;max-width:560px;margin:0 auto}
-h1{font-size:1.15rem;text-align:center;letter-spacing:0.5px}
-.sub{text-align:center;font-size:0.75rem;color:var(--sub);margin-bottom:10px}
-.badge{padding:9px;border-radius:8px;font-weight:bold;text-align:center;font-size:0.95rem;margin-bottom:10px;letter-spacing:0.5px;transition:all .3s}
-.b-norm{background:#064e3b;color:#a7f3d0}
-.b-stress{background:#1e3a8a;color:#bfdbfe}
-.b-alert{background:#78350f;color:#fde68a}
-.b-emerg{background:#7f1d1d;color:#fecaca;animation:pulse 1s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+:root{--bg:#070d1e;--card:#131c36;--b:#263556;--t:#f1f5f9;--sub:#94a3b8;--green:#10b981;--yellow:#f59e0b;--red:#ef4444}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--t);padding:12px;max-width:560px;margin:0 auto}
+h1{font-size:1.15rem;text-align:center;letter-spacing:.5px}.sub{text-align:center;font-size:.75rem;color:var(--sub);margin-bottom:10px}
+.badge{padding:9px;border-radius:8px;font-weight:700;text-align:center;font-size:.95rem;margin-bottom:10px;letter-spacing:.5px;transition:all .3s}
+.b-norm{background:#064e3b;color:#a7f3d0}.b-stress{background:#1e3a8a;color:#bfdbfe}.b-alert{background:#78350f;color:#fde68a}.b-emerg{background:#7f1d1d;color:#fecaca;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
-.card{background:var(--card);padding:10px;border-radius:8px;border:1px solid var(--border)}
-.card-t{font-size:0.68rem;color:var(--sub);text-transform:uppercase;margin-bottom:2px}
-.card-v{font-size:1.25rem;font-weight:bold}
-.unit{font-size:0.75rem;font-weight:normal;color:var(--sub)}
+.card{background:var(--card);padding:10px;border-radius:8px;border:1px solid var(--b)}
+.card-t{font-size:.68rem;color:var(--sub);text-transform:uppercase;margin-bottom:2px}.card-v{font-size:1.25rem;font-weight:700}
+.unit{font-size:.75rem;font-weight:400;color:var(--sub)}
 .bar-wrap{background:#1e293b;border-radius:99px;height:8px;overflow:hidden;margin-top:5px}
 .bar-fill{background:var(--green);height:100%;transition:width .4s}
-.chart-box{background:var(--card);padding:10px;border-radius:8px;border:1px solid var(--border);margin-bottom:10px}
-.chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:0.75rem;color:var(--sub)}
+.chart-box{background:var(--card);padding:10px;border-radius:8px;border:1px solid var(--b);margin-bottom:10px}
+.chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:.75rem;color:var(--sub)}
 canvas{width:100%;height:180px;background:#0b1329;border-radius:6px;display:block}
 .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px}
-button{background:#1e293b;color:#fff;border:1px solid var(--border);padding:8px 4px;border-radius:6px;font-size:0.75rem;font-weight:600;cursor:pointer}
-button:active{transform:scale(0.96)}
+button{background:#1e293b;color:#fff;border:1px solid var(--b);padding:8px 4px;border-radius:6px;font-size:.75rem;font-weight:600;cursor:pointer}
+button:active{transform:scale(.96)}
 .btn-auto{background:#0284c7;grid-column:span 4;border:none}
 .btn-silence{background:#d97706;grid-column:span 2;border:none}
 .btn-unsilence{background:#475569;grid-column:span 2;border:none}
 .btn-logout{background:#7f1d1d;grid-column:span 4;border:none;margin-top:6px}
-.info-bar{font-size:0.65rem;color:var(--sub);text-align:center;margin:6px 0;padding:4px;background:#0f172a;border-radius:4px}
-.footer{text-align:center;font-size:0.68rem;color:var(--sub);margin-top:10px}
-select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-size:0.72rem}
+.info-bar{font-size:.65rem;color:var(--sub);text-align:center;margin:6px 0;padding:4px;background:#0f172a;border-radius:4px}
+.footer{text-align:center;font-size:.68rem;color:var(--sub);margin-top:10px}
+select{background:#1e293b;color:#fff;border:1px solid var(--b);padding:4px 8px;border-radius:4px;font-size:.72rem}
 </style>
 </head>
 <body>
 <h1>NODO IOT SABANA CENTRO</h1>
-<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; BME280 + ILI9341 &bull; Histeresis</div>
+<div class="sub">Challenge #2 &bull; Dual-Core FreeRTOS &bull; BME280 + ILI9341 &bull; Histéresis</div>
 <div id="risk-badge" class="badge b-norm">ESTADO: NORMAL</div>
 <div class="grid">
   <div class="card" style="grid-column:span 2">
@@ -525,142 +530,156 @@ select{background:#1e293b;color:#fff;border:1px solid var(--border);padding:4px 
     <div class="bar-wrap"><div id="lvl-bar" class="bar-fill" style="width:0%"></div></div>
   </div>
   <div class="card">
-    <div class="card-t">Caudal Instant&aacute;neo</div>
-    <div class="card-v"><span id="flow">--</span> <span class="unit">L/min</span></div>
     <div class="card-t">Tasa de Descenso</div>
     <div class="card-v"><span id="drop">--</span> <span class="unit">cm/h</span></div>
   </div>
   <div class="card">
     <div class="card-t">Temperatura (BME280)</div>
     <div class="card-v"><span id="temp">--</span> <span class="unit">&deg;C</span></div>
-    <div class="card-t">Humedad Relativa</div>
+    <div class="card-t" style="margin-top:6px">Humedad Relativa</div>
     <div class="card-v"><span id="hum">--</span> <span class="unit">%HR</span></div>
   </div>
   <div class="card">
-    <div class="card-t">Presi&oacute;n Atmosf&eacute;rica</div>
+    <div class="card-t">Presión Atmosférica</div>
     <div class="card-v"><span id="press">--</span> <span class="unit">hPa</span></div>
   </div>
   <div class="card">
     <div class="card-t">ETo Hargreaves-Samani</div>
-    <div class="card-v"><span id="eto">--</span> <span class="unit">mm/d&iacute;a</span></div>
+    <div class="card-v"><span id="eto">--</span> <span class="unit">mm/día</span></div>
   </div>
   <div class="card" style="grid-column:span 2">
-    <div class="card-t">Diagn&oacute;stico y Salud de Hardware</div>
-    <div style="display:flex;justify-content:space-between;font-size:0.75rem;padding-top:4px;flex-wrap:wrap;gap:6px">
-      <span>BME280: <b id="hw-sht">--</b></span>
+    <div class="card-t">Diagnóstico y Salud de Hardware</div>
+    <div style="display:flex;justify-content:space-between;font-size:.75rem;padding-top:4px;flex-wrap:wrap;gap:6px">
+      <span>BME280: <b id="hw-bme">--</b></span>
       <span>Eco US: <b id="hw-echo">--</b></span>
-      <span>LittleFS: <b id="hw-fs">--</b></span>
-      <span>SD: <b id="hw-sd">--</b></span>
+      <span>MicroSD: <b id="hw-sd">--</b></span>
       <span>RAM: <b id="hw-ram">--</b></span>
       <span>WiFi: <b id="hw-rssi">--</b></span>
     </div>
   </div>
 </div>
-<div id="info-bar" class="info-bar">Uptime: -- | NTP: -- | Histeresis: activa</div>
+<div id="info-bar" class="info-bar">Uptime: -- | NTP: -- | Histéresis: activa</div>
 <div class="chart-box">
   <div class="chart-header">
-    <span>Historico (ultimas muestras)</span>
+    <span>Histórico (Buffer SRAM)</span>
     <select id="chart-var" onchange="drawChart()">
-      <option value="l">Nivel (cm)</option>
-      <option value="tc">Temp (C)</option>
+      <option value="eto">Evaporación potencial (mm/día)</option>
+      <option value="lp">Nivel (%)</option>
+      <option value="tc">Temp (&deg;C)</option>
       <option value="h">Humedad (%)</option>
-      <option value="q">Caudal (L/min)</option>
-      <option value="p">Presion (hPa)</option>
+      <option value="dr">Descenso (cm/h)</option>
+      <option value="p">Presión (hPa)</option>
     </select>
   </div>
   <canvas id="chart"></canvas>
 </div>
 <div class="btns">
   <button onclick="sendCmd('test 0')">Normal</button>
-  <button onclick="sendCmd('test 1')">Estr&eacute;s</button>
+  <button onclick="sendCmd('test 1')">Estrés</button>
   <button onclick="sendCmd('test 2')">Alerta</button>
   <button onclick="sendCmd('test 3')">Emerg.</button>
-  <button class="btn-auto" onclick="sendCmd('auto')">Modo Autom&aacute;tico (Sensores)</button>
+  <button class="btn-auto" onclick="sendCmd('auto')">Modo Automático (Sensores)</button>
   <button class="btn-silence" onclick="sendCmd('silence 300')">Silenciar 5min</button>
   <button class="btn-unsilence" onclick="sendCmd('unsilence')">Reactivar</button>
-  <button class="btn-logout" onclick="logout()">Cerrar Sesi&oacute;n</button>
+  <button class="btn-logout" onclick="logout()">Cerrar Sesión</button>
 </div>
-<div class="footer">ESP32 Ch2 &bull; Core 0: WebServer &bull; Core 1: Fusion &bull; Histeresis 3/5</div>
+<div class="footer">ESP32 Ch2 &bull; Core 0: WebServer &bull; Core 1: Fusión &bull; Histéresis 3/5</div>
 <script>
+const $=i=>document.getElementById(i);
 let histData=[];
-const BC=['#10b981','#38bdf8','#14b8a6','#f59e0b','#94a3b8'];
+const BC=['#10b981','#38bdf8','#14b8a6','#f59e0b','#a855f7','#94a3b8'];
+const VARS = ['eto', 'lp', 'tc', 'h', 'dr', 'p'];
+
 function upd(){
-  fetch('/api/data').then(r=>{if(!r.ok)throw r;return r.json()}).then(d=>{
-    document.getElementById('lvl-cm').textContent=d.level_cm.toFixed(1);
-    document.getElementById('lvl-pct').textContent=d.level_pct.toFixed(0);
-    document.getElementById('lvl-bar').style.width=Math.max(0,Math.min(100,d.level_pct))+'%';
-    document.getElementById('flow').textContent=d.flow_lmin.toFixed(2);
-    document.getElementById('drop').textContent=d.drop_rate.toFixed(2);
-    document.getElementById('temp').textContent=d.temp_c.toFixed(1);
-    document.getElementById('hum').textContent=d.humidity_pct.toFixed(1);
-    document.getElementById('press').textContent=d.pressure_hpa<0?'N/D':d.pressure_hpa.toFixed(0);
-    document.getElementById('eto').textContent=d.eto_mm_day.toFixed(2);
-    let b=document.getElementById('risk-badge');
-    let cls=['b-norm','b-stress','b-alert','b-emerg'];
-    b.className='badge '+(cls[d.risk_state]||cls[0]);
-    b.textContent='ESTADO: '+d.risk_label+(d.override>=0?' [MANUAL]':'')+(d.silenced?' [SILENCIADO]':'');
-    let bar=document.getElementById('lvl-bar');
-    bar.style.background=d.risk_state>=2?'var(--red)':d.risk_state==1?'var(--yellow)':'var(--green)';
-    document.getElementById('info-bar').textContent=
-      'Uptime: '+(d.uptime_s/60|0)+'min | NTP: '+(d.ntp_synced?'OK':'Fallback')+
-      ' | Histeresis: '+(d.hysteresis_state>=0?'R'+d.hysteresis_state:'activa')+
-      (d.silenced?' | Silencio: '+d.silence_s+'s':'');
-    if(d.hw){
-      let shtEl=document.getElementById('hw-sht');
-      shtEl.textContent=d.hw.sht?'ONLINE':'FALLO';
-      shtEl.style.color=d.hw.sht?'var(--green)':'var(--red)';
-      let echoEl=document.getElementById('hw-echo');
-      echoEl.textContent=d.hw.echo?'OK':'SIN ECO';
-      echoEl.style.color=d.hw.echo?'var(--green)':'var(--red)';
-      let fsEl=document.getElementById('hw-fs');
-      fsEl.textContent=d.hw.fs?'MONTADO':'N/A';
-      fsEl.style.color=d.hw.fs?'var(--green)':'var(--yellow)';
-      let sdEl=document.getElementById('hw-sd');
-      sdEl.textContent=d.hw.sd?'MONTADA':'N/A';
-      sdEl.style.color=d.hw.sd?'var(--green)':'var(--yellow)';
-      document.getElementById('hw-ram').textContent=d.hw.heap_kb+' KB';
-      let wifiEl=document.getElementById('hw-rssi');
-      if(d.hw.wifi_sta){
-        wifiEl.textContent='STA ('+d.hw.rssi+' dBm)';
-        wifiEl.style.color='var(--green)';
-      }else if(d.hw.ap_fallback){
-        wifiEl.textContent='AP Fallback';
-        wifiEl.style.color='var(--yellow)';
-      }else{
-        wifiEl.textContent='DESCONECT';
-        wifiEl.style.color='var(--red)';
+  fetch('/api/data')
+    .then(r=>{if(r.status===401){location.href='/login';return;}return r.ok?r.json():null;})
+    .then(d=>{
+      if(!d)return;
+      $('lvl-cm').textContent=d.level_cm.toFixed(1);
+      $('lvl-pct').textContent=d.level_pct.toFixed(0);
+      $('lvl-bar').style.width=Math.max(0,Math.min(100,d.level_pct))+'%';
+      $('lvl-bar').style.background=d.risk_state>=2?'var(--red)':d.risk_state==1?'var(--yellow)':'var(--green)';
+      $('drop').textContent=d.drop_rate.toFixed(2);
+      $('temp').textContent=d.temp_c.toFixed(1);
+      $('hum').textContent=d.humidity_pct.toFixed(1);
+      $('press').textContent=d.pressure_hpa<0?'N/D':d.pressure_hpa.toFixed(0);
+      $('eto').textContent=d.eto_mm_day.toFixed(2);
+      
+      const b=$('risk-badge');
+      const cls=['b-norm','b-stress','b-alert','b-emerg'];
+      b.className='badge '+(cls[d.risk_state]||cls[0]);
+      b.textContent='ESTADO: '+d.risk_label+(d.override>=0?' [MANUAL]':'')+(d.silenced?' [SILENCIADO]':'');
+      
+      $('info-bar').textContent=
+        'Uptime: '+(d.uptime_s/60|0)+'min | NTP: '+(d.ntp_synced?'OK':'Fallback')+
+        ' | Histéresis: '+(d.hysteresis_state>=0?'R'+d.hysteresis_state:'activa')+
+        (d.silenced?' | Silencio: '+d.silence_s+'s':'');
+        
+      if(d.hw){
+        const bmeOk=d.hw.sht;
+        $('hw-bme').textContent=bmeOk?'ONLINE':'FALLO';
+        $('hw-bme').style.color=bmeOk?'var(--green)':'var(--red)';
+        $('hw-echo').textContent=d.hw.echo?'OK':'SIN ECO';
+        $('hw-echo').style.color=d.hw.echo?'var(--green)':'var(--red)';
+        $('hw-sd').textContent=d.hw.sd?'MONTADA':'N/A';
+        $('hw-sd').style.color=d.hw.sd?'var(--green)':'var(--yellow)';
+        $('hw-ram').textContent=d.hw.heap_kb+' KB';
+        const w=$('hw-rssi');
+        if(d.hw.wifi_sta){w.textContent='STA ('+d.hw.rssi+' dBm)';w.style.color='var(--green)';}
+        else if(d.hw.ap_fallback){w.textContent='AP Fallback';w.style.color='var(--yellow)';}
+        else{w.textContent='DESCONECT';w.style.color='var(--red)';}
       }
-    }
-  }).catch(()=>{location.href='/login';});
+    })
+    .catch(()=>{});
 }
+
 function loadHist(){
-  fetch('/api/history').then(r=>r.json()).then(d=>{histData=d.records||[];drawChart();}).catch(()=>{});
+  fetch('/api/history')
+    .then(r=>r.ok?r.json():null)
+    .then(d=>{if(d&&d.records){histData=d.records;drawChart();}})
+    .catch(()=>{});
 }
+
 function drawChart(){
-  let c=document.getElementById('chart'),ctx=c.getContext('2d');
+  const c=$('chart'),ctx=c.getContext('2d');
   c.width=c.offsetWidth;c.height=180;
   ctx.fillStyle='#0b1329';ctx.fillRect(0,0,c.width,c.height);
   if(!histData.length)return;
-  let k=document.getElementById('chart-var').value;
-  let vals=histData.map(r=>r[k]||0);
+  
+  const k=$('chart-var').value;
+  const vals=histData.map(r=>r[k]!==undefined?r[k]:0).filter(v=>k!=='p'||v>0);
+  if(!vals.length)return;
+  
   let mn=Math.min(...vals),mx=Math.max(...vals);
-  if(mx===mn)mx=mn+1;
-  let w=c.width,h=c.height,pad=20;
-  ctx.strokeStyle=BC[['l','tc','h','q','p'].indexOf(k)]||BC[0];
-  ctx.lineWidth=1.5;ctx.beginPath();
+  if(mx===mn){mx+=1;mn=Math.max(0,mn-1);}
+  const w=c.width,h=c.height,pad=25;
+  const col=BC[VARS.indexOf(k)]||BC[0];
+  
+  ctx.strokeStyle=col;ctx.fillStyle=col;ctx.lineWidth=1.5;ctx.beginPath();
   for(let i=0;i<vals.length;i++){
-    let x=pad+i*(w-pad*2)/(vals.length-1||1);
-    let y=h-pad-(vals[i]-mn)/(mx-mn)*(h-pad*2);
-    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    const x=pad+i*(w-pad*2)/(vals.length-1||1);
+    const y=h-pad-(vals[i]-mn)/(mx-mn)*(h-pad*2);
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
   }
   ctx.stroke();
-  ctx.fillStyle='#94a3b8';ctx.font='10px sans-serif';
-  ctx.fillText(mx.toFixed(1),2,pad-2);
-  ctx.fillText(mn.toFixed(1),2,h-4);
-  ctx.fillText(vals.length+' muestras',w-80,h-4);
+  
+  if(vals.length===1){
+    const y=h-pad-(vals[0]-mn)/(mx-mn)*(h-pad*2);
+    ctx.beginPath();ctx.arc(pad,y,3,0,6.28);ctx.fill();
+  }
+  
+// Formateo de los ejes: 2 decimales para evapotranspiración (mm/día), 1 para el resto
+  const dec = (k === 'eto') ? 2 : 1;
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px sans-serif';
+  ctx.fillText(mx.toFixed(dec), 2, pad - 4);
+  ctx.fillText(mn.toFixed(dec), 2, h - 6);
+  ctx.fillText(vals.length + ' muestras', w - 70, h - 6);
 }
+
 function sendCmd(c){fetch('/api/cmd?c='+encodeURIComponent(c),{method:'POST'}).catch(()=>{});}
-function logout(){fetch('/api/logout',{method:'POST'}).then(()=>{location.href='/login';}).catch(()=>{location.href='/login';});}
+function logout(){fetch('/api/logout',{method:'POST'}).finally(()=>{location.href='/login';});}
+
 setInterval(upd,2000);
 setInterval(loadHist,30000);
 upd();loadHist();
@@ -670,14 +689,13 @@ upd();loadHist();
 )rawliteral";
 
 // ============================================================================
-// Filtro de Seguridad por Subred (Verificación IP)
+// Filtro de Seguridad por Subred
 // ============================================================================
 bool validateSubnetFilter() {
     WiFiClient client = server.client();
     IPAddress clientIP = client.remoteIP();
     IPAddress mask(255, 255, 255, 0);
 
-    // 1. Validar contra la subred del SoftAP local (192.168.4.0/24) si está activo
     IPAddress apIP = WiFi.softAPIP();
     uint32_t cIp = static_cast<uint32_t>(clientIP);
     uint32_t apIpUint = static_cast<uint32_t>(apIP);
@@ -687,7 +705,6 @@ bool validateSubnetFilter() {
         return true;
     }
 
-    // 2. Validar contra la subred STA
     if (WiFi.status() == WL_CONNECTED) {
         IPAddress staIP = WiFi.localIP();
         IPAddress staMask = WiFi.subnetMask();
@@ -703,10 +720,8 @@ bool validateSubnetFilter() {
 }
 
 // ============================================================================
-// Manejadores HTTP (Core 0 — WebServer)
+// Manejadores HTTP (Core 0)
 // ============================================================================
-
-// Forward declaration para CLI
 void processCLICommand(char* cmd);
 
 void handleLogin() {
@@ -745,7 +760,6 @@ void handleApiLogin() {
         return;
     }
 
-    // Verificar password con SHA-256 + salt
     char inputHash[65];
     computePasswordHash(AUTH_SALT, pass.c_str(), inputHash);
     if (strcmp(inputHash, storedPasswordHash) != 0) {
@@ -753,7 +767,6 @@ void handleApiLogin() {
         return;
     }
 
-    // Crear sesión
     String token = createSession();
     server.sendHeader("Set-Cookie", "session=" + token + "; HttpOnly; SameSite=Strict; Path=/; Max-Age=900");
     server.send(200, "text/plain", "OK");
@@ -812,13 +825,13 @@ void handleApiData() {
 
     char json[768];
     snprintf(json, sizeof(json),
-        "{\"level_cm\":%.2f,\"level_pct\":%.1f,\"flow_lmin\":%.2f,\"drop_rate\":%.2f,"
+        "{\"level_cm\":%.2f,\"level_pct\":%.1f,\"drop_rate\":%.2f,"
         "\"temp_c\":%.2f,\"pressure_hpa\":%.2f,\"humidity_pct\":%.2f,\"eto_mm_day\":%.2f,"
         "\"risk_state\":%d,\"risk_label\":\"%s\",\"override\":%d,"
         "\"silenced\":%s,\"silence_s\":%lu,\"uptime_s\":%lu,"
         "\"ntp_synced\":%s,\"hysteresis_state\":%d,"
-        "\"hw\":{\"sht\":%s,\"echo\":%s,\"fs\":%s,\"sd\":%s,\"heap_kb\":%u,\"rssi\":%d,\"wifi_sta\":%s,\"ap_fallback\":%s}}",
-        rec.levelCm, rec.levelPercent, rec.flowLMin, rec.dropRateCmH,
+        "\"hw\":{\"sht\":%s,\"echo\":%s,\"sd\":%s,\"heap_kb\":%u,\"rssi\":%d,\"wifi_sta\":%s,\"ap_fallback\":%s}}",
+        rec.levelCm, rec.levelPercent, rec.dropRateCmH,
         rec.tempC, rec.pressureHpa, rec.humidityPct, rec.etoMmDay,
         effectiveRisk, iot::watermonitor::riskLabel(effectiveRisk),
         currentOverride, (silenced ? "true" : "false"),
@@ -827,7 +840,6 @@ void handleApiData() {
         (ntpSynced ? "true" : "false"), hystState,
         (bmeAvailable ? "true" : "false"),
         (echoSensorOk ? "true" : "false"),
-        (littleFsMounted ? "true" : "false"),
         (sdMounted ? "true" : "false"),
         (unsigned int)freeHeapKb, rssi,
         (staConnected ? "true" : "false"),
@@ -860,11 +872,11 @@ void handleApiHistory() {
     for (size_t i = 0; i < count; i++) {
         char itemJson[100];
         snprintf(itemJson, sizeof(itemJson),
-            "%s{\"t\":%lu,\"l\":%.1f,\"lp\":%.0f,\"q\":%.1f,\"tc\":%.1f,\"h\":%.1f,\"p\":%.0f,\"r\":%u}",
+            "%s{\"t\":%lu,\"eto\":%.2f,\"lp\":%.0f,\"dr\":%.2f,\"tc\":%.1f,\"h\":%.1f,\"p\":%.0f,\"r\":%u}",
             (i > 0 ? "," : ""),
             static_cast<unsigned long>(snapshot[i].uptimeSec),
-            snapshot[i].levelCm, snapshot[i].levelPercent,
-            snapshot[i].flowLMin, snapshot[i].tempC, snapshot[i].humidityPct, snapshot[i].pressureHpa, snapshot[i].riskState
+            snapshot[i].etoMmDay, snapshot[i].levelPercent,
+            snapshot[i].dropRateCmH, snapshot[i].tempC, snapshot[i].humidityPct, snapshot[i].pressureHpa, snapshot[i].riskState
         );
         server.sendContent(itemJson);
     }
@@ -896,7 +908,7 @@ void handleApiHealth() {
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 0: Servidor Web HTTP lwIP
+// Tarea FreeRTOS Core 0: Servidor Web HTTP
 // ============================================================================
 void Task_WebServer_HTTP(void* pvParameters) {
     (void)pvParameters;
@@ -923,7 +935,7 @@ void Task_WebServer_HTTP(void* pvParameters) {
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: Adquisición de Sensores (HC-SR04, Hall, BME280)
+// Tarea FreeRTOS Core 1: Adquisición de Sensores
 // ============================================================================
 void Task_SensorAcquisition(void* pvParameters) {
     (void)pvParameters;
@@ -941,13 +953,14 @@ void Task_SensorAcquisition(void* pvParameters) {
         if (elapsedSec <= 0.0f) elapsedSec = 2.0f;
         lastAcqTime = now;
 
-        // 1. Conteo atómico de pulsos Hall con spinlock
+        unsigned long pulses = 0;
+#if ENABLE_FLOW_SENSOR
         portENTER_CRITICAL(&flowMux);
-        unsigned long pulses = pulseCounter;
+        pulses = pulseCounter;
         pulseCounter = 0;
         portEXIT_CRITICAL(&flowMux);
+#endif
 
-        // 2. Lectura BME280 con reintento periódico y protección contra congelamiento
         float ambientTempC = 20.0f;
         float pressureHpa = PRESSURE_UNAVAILABLE_HPA;
         float humidityPct = 65.0f;
@@ -955,42 +968,37 @@ void Task_SensorAcquisition(void* pvParameters) {
         if (bmeAvailable) {
             ambientTempC = bme.readTemperature();
             humidityPct = bme.readHumidity();
-            pressureHpa = bme.readPressure() / 100.0f; // Pa → hPa
+            pressureHpa = bme.readPressure() / 100.0f;
 
-            // Si devuelve NaN o una temperatura absurda (fuera de rango físico -40 a 85 C)
             if (isnan(ambientTempC) || isnan(humidityPct) || isnan(pressureHpa) || ambientTempC < -40.0f || ambientTempC > 85.0f) {
                 ambientTempC = lastValidTempC;
                 humidityPct = lastValidHumidityPct;
                 pressureHpa = lastValidPressureHpa;
                 bmeAvailable = false;
-                lastBmeRetry = now; // Iniciar contador de reintento inmediato
+                lastBmeRetry = now;
             } else {
                 lastValidTempC = ambientTempC;
                 lastValidHumidityPct = humidityPct;
                 lastValidPressureHpa = pressureHpa;
             }
-        } else if (now - lastBmeRetry > 3000) { // Reintentar cada 3 s en lugar de cada 30 s
+        } else if (now - lastBmeRetry > 3000) {
             lastBmeRetry = now;
             if (detectAndInitBME280()) {
                 Serial.println("[OK] BME280 reconectado con éxito tras fallo.");
             }
         }
 
-        // 3. Medición de Nivel Acústico (Fail-Safe: mantiene último válido)
         float currentLevel = readAcousticLevel(ambientTempC, prevLevel);
         prevLevel = currentLevel;
 
-        // 4. Actualizar ventana térmica 24h para Hargreaves-Samani
         if (ambientTempC < tempMin24h) tempMin24h = ambientTempC;
         if (ambientTempC > tempMax24h) tempMax24h = ambientTempC;
-        // Reset ventana cada 24h
         if (now - lastTempResetMillis > TEMP_WINDOW_MS) {
             lastTempResetMillis = now;
             tempMin24h = ambientTempC;
             tempMax24h = ambientTempC;
         }
 
-        // 5. Publicar datos crudos para Task_EdgeAnalytics vía cola atómica (C1)
         RawAcquisitionData raw{ambientTempC, pressureHpa, humidityPct, currentLevel, pulses, elapsedSec};
         xQueueOverwrite(rawSensorQueue, &raw);
 
@@ -999,7 +1007,7 @@ void Task_SensorAcquisition(void* pvParameters) {
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: Analítica de Borde, ETo y Matriz de Riesgo con Histéresis
+// Tarea FreeRTOS Core 1: Analítica de Borde
 // ============================================================================
 void Task_EdgeAnalytics(void* pvParameters) {
     (void)pvParameters;
@@ -1011,11 +1019,11 @@ void Task_EdgeAnalytics(void* pvParameters) {
         RawAcquisitionData data;
         xQueueReceive(rawSensorQueue, &data, portMAX_DELAY);
 
-        // 1. Caudal volumétrico
+#if ENABLE_FLOW_SENSOR
         float flowFactor = currentFlowFactor;
         float flowLMin = iot::watermonitor::computeInstantFlowLMin(data.pulses, data.elapsedSec, flowFactor);
+#endif
 
-        // 2. Nivel relativo y tasa de descenso
         float levelPercent = (data.waterLevelCm / iot::watermonitor::TANK_HEIGHT_CM) * 100.0f;
         if (isFirstAnalyticsRun) {
             previousWaterLevel = data.waterLevelCm;
@@ -1026,19 +1034,22 @@ void Task_EdgeAnalytics(void* pvParameters) {
         if (dropRateCmH < 0.0f) dropRateCmH = 0.0f;
         previousWaterLevel = data.waterLevelCm;
 
-        // 3. Evapotranspiración ETo Hargreaves-Samani con día juliano REAL (NTP)
         int dayOfYear = getDayOfYear();
         float eto = iot::watermonitor::calculateHargreavesETo(dayOfYear, tempMin24h, tempMax24h);
 
-        // 4. Evaluación de Riesgo Instantáneo
+#if ENABLE_FLOW_SENSOR
         int rawRisk = iot::watermonitor::evaluateRisk(levelPercent, dropRateCmH, eto, flowLMin);
+#else
+        int rawRisk = iot::watermonitor::evaluateRisk(levelPercent, dropRateCmH, eto);
+#endif
 
-        // 5. Empaquetar y almacenar con Histéresis Temporal (bajo Mutex único)
         iot::watermonitor::TelemetryRecord rec{};
         rec.uptimeSec = millis() / 1000;
         rec.levelCm = data.waterLevelCm;
         rec.levelPercent = levelPercent;
+#if ENABLE_FLOW_SENSOR
         rec.flowLMin = flowLMin;
+#endif
         rec.dropRateCmH = dropRateCmH;
         rec.tempC = data.ambientTempC;
         rec.pressureHpa = data.pressureHpa;
@@ -1051,6 +1062,7 @@ void Task_EdgeAnalytics(void* pvParameters) {
             sramRingBuffer.push(rec);
             xSemaphoreGive(telemetryMutex);
         }
+
         unsigned long now = millis();
         if (lastSdPersist == 0 || now - lastSdPersist >= HISTORY_PERSIST_MS) {
             appendTelemetryToSd(rec);
@@ -1060,15 +1072,17 @@ void Task_EdgeAnalytics(void* pvParameters) {
 }
 
 // ============================================================================
-// Renderizado del Display ILI9341: página fija densa (240x320, RGB565)
+// Renderizado ILI9341 Anti-Flicker con Relleno Opaco (Zero Glitch)
 // ============================================================================
-unsigned long lastTftRenderMillis = 0;
+static int lastRenderedRisk = -1;
+static unsigned long lastTftRenderMillis = 0;
+static bool isFirstTftRender = true;
 
 void renderTftStatusPage(int effectiveRisk, const iot::watermonitor::TelemetryRecord& rec) {
-    if (spiMutex == NULL ||
-        xSemaphoreTake(spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+    if (spiMutex == NULL || xSemaphoreTake(spiMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
         return;
     }
+
     const unsigned long now = millis();
     if (now - lastTftRenderMillis < 250) {
         xSemaphoreGive(spiMutex);
@@ -1076,70 +1090,83 @@ void renderTftStatusPage(int effectiveRisk, const iot::watermonitor::TelemetryRe
     }
     lastTftRenderMillis = now;
 
-    const uint16_t riskColor = effectiveRisk == 0 ? ILI9341_GREEN :
-                               effectiveRisk == 1 ? ILI9341_CYAN :
-                               effectiveRisk == 2 ? ILI9341_ORANGE : ILI9341_RED;
+    // Primer arranque: limpia pantalla y dibuja encabezado estático
+    if (isFirstTftRender) {
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setTextSize(2);
+        tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+        tft.setCursor(6, 5);
+        tft.print("MONITOR HIDRICO");
+        lastRenderedRisk = -1; // Forzar redibujado de banner
+        isFirstTftRender = false;
+    }
+
     const char* riskLabel = iot::watermonitor::riskLabel(effectiveRisk);
-    const String ip = WiFi.status() == WL_CONNECTED
+    const String ip = (WiFi.status() == WL_CONNECTED)
                         ? WiFi.localIP().toString()
                         : ((apFallbackActive || (WiFi.getMode() & WIFI_MODE_AP))
-                           ? WiFi.softAPIP().toString() : "conectando");
+                           ? WiFi.softAPIP().toString() : "Conectando...");
     const char* buzzer = isAlarmSilenced ? "MUT" : (effectiveRisk >= 2 ? "ON" : "OFF");
 
-    tft.fillRect(0, 0, 240, 320, ILI9341_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(6, 5);
-    tft.print("MONITOR HIDRICO");
+    // 1. Diagnóstico de red y buzzer (Tamaño 1, con relleno opaco)
     tft.setTextSize(1);
-    tft.setCursor(6, 30);
-    tft.print(WiFi.status() == WL_CONNECTED ? "IP: " : "AP: ");
-    tft.print(ip);
-    tft.setCursor(6, 43);
-    tft.print("Buzzer: ");
-    tft.print(buzzer);
-    if (manualRiskOverride >= 0) tft.print("  TEST");
+    tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    tft.setCursor(6, 28);
+    tft.printf("%s %-16s RSSI: %-4d", (WiFi.status() == WL_CONNECTED ? "IP:" : "AP:"), ip.c_str(), (WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0));
+    tft.setCursor(6, 40);
+    tft.printf("Buzzer: %-3s %s", buzzer, (manualRiskOverride >= 0 ? "[TEST MANUAL]   " : "                "));
 
-    tft.fillRoundRect(4, 58, 232, 38, 4, riskColor);
-    tft.setTextColor(ILI9341_BLACK);
+    // 2. Banner de Riesgo: Dirty-Checking (Solo redibuja si cambia de estado)
+    if (effectiveRisk != lastRenderedRisk) {
+        lastRenderedRisk = effectiveRisk;
+        const uint16_t riskColor = (effectiveRisk == 0) ? ILI9341_GREEN :
+                                   (effectiveRisk == 1) ? ILI9341_CYAN :
+                                   (effectiveRisk == 2) ? ILI9341_ORANGE : ILI9341_RED;
+
+        tft.fillRoundRect(4, 56, 232, 38, 4, riskColor);
+        tft.setTextColor(ILI9341_BLACK, riskColor);
+        tft.setTextSize(2);
+        tft.setCursor(12, 68);
+        tft.printf("RIESGO: %-10s", riskLabel);
+    }
+
+    // 3. Telemetría Principal: Relleno Opaco Texto + Fondo Negro (Anti-Flicker)
+    // El texto completo con espacios fijos sobreescribe los valores anteriores sin borrar la pantalla
+    tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
     tft.setTextSize(2);
-    tft.setCursor(12, 69);
-    tft.print("RIESGO: ");
-    tft.print(riskLabel);
 
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(8, 110);
-    tft.printf("Nivel: %5.1f cm", rec.levelCm);
-    tft.setCursor(8, 132);
-    tft.printf("Llenado: %4.1f %%", rec.levelPercent);
-    tft.setCursor(8, 154);
-    tft.printf("Caudal: %5.2f L/m", rec.flowLMin);
-    tft.setCursor(8, 176);
-    tft.printf("Descenso: %4.1f cm/h", rec.dropRateCmH);
-    tft.setCursor(8, 198);
-    tft.printf("Temp: %5.1f C", rec.tempC);
-    tft.setCursor(8, 220);
-    tft.printf("Hum:  %5.1f %%", rec.humidityPct);
-    tft.setCursor(8, 242);
-    tft.printf("ETo:  %5.2f mm/d", rec.etoMmDay);
+    tft.setCursor(8, 110); tft.printf("Nivel:    %5.1f cm  ", rec.levelCm);
+    tft.setCursor(8, 132); tft.printf("Llenado:  %5.1f %%   ", rec.levelPercent);
+#if ENABLE_FLOW_SENSOR
+    tft.setCursor(8, 154); tft.printf("Caudal:   %5.2f L/m ", rec.flowLMin);
+#else
+    tft.setCursor(8, 154); tft.print("Caudal:   N/D (Poda)  ");
+#endif
+    tft.setCursor(8, 176); tft.printf("Descenso: %5.1f cm/h", rec.dropRateCmH);
+    tft.setCursor(8, 198); tft.printf("Temp:     %5.1f C   ", rec.tempC);
+    tft.setCursor(8, 220); tft.printf("Hum:      %5.1f %%   ", rec.humidityPct);
+    tft.setCursor(8, 242); tft.printf("ETo:      %5.2f mm/d", rec.etoMmDay);
 
+    // 4. Barra Inferior de Diagnósticos (Tamaño 1)
     tft.setTextSize(1);
     tft.setCursor(8, 270);
-    tft.print("BME280: ");
-    tft.print(bmeAvailable ? "OK" : "N/A");
-    tft.print("  SD: ");
-    tft.print(sdMounted ? "OK" : "N/A");
+    tft.printf("BME280: %-3s  SD: %-3s            ", (bmeAvailable ? "OK" : "N/A"), (sdMounted ? "OK" : "N/A"));
+    
     tft.setCursor(8, 285);
-    tft.print("Presion: ");
-    tft.print(rec.pressureHpa < 0 ? "N/D" : String(rec.pressureHpa, 1) + " hPa");
+    if (rec.pressureHpa < 0.0f) {
+        tft.print("Presion: N/D                 ");
+    } else {
+        tft.printf("Presion: %-6.1f hPa          ", rec.pressureHpa);
+    }
+
     tft.setCursor(8, 302);
-    tft.printf("Uptime: %lu s", static_cast<unsigned long>(rec.uptimeSec));
+    tft.printf("Uptime: %-6lu s  RAM: %-3u KB", static_cast<unsigned long>(rec.uptimeSec), (unsigned int)(ESP.getFreeHeap() / 1024));
+
     xSemaphoreGive(spiMutex);
 }
 
 // ============================================================================
-// Tarea FreeRTOS Core 1: HMI Local (ILI9341, LEDs, Buzzer con Watchdog)
+// Tarea FreeRTOS Core 1: HMI Local
 // ============================================================================
 void Task_HMI_Local(void* pvParameters) {
     (void)pvParameters;
@@ -1158,6 +1185,11 @@ void Task_HMI_Local(void* pvParameters) {
         }
         int effectiveRisk = (currentOverride >= 0) ? currentOverride : riskState;
 
+        // Silencio antes de redibujar el TFT (SPI) para no sumar su latencia al apagado
+        if (isAlarmSilenced || effectiveRisk < 2) {
+            digitalWrite(PIN_BUZZER, LOW);
+        }
+
         renderTftStatusPage(effectiveRisk, record);
 
         // Watchdog de Silenciamiento
@@ -1173,49 +1205,233 @@ void Task_HMI_Local(void* pvParameters) {
         }
 
         // Actuación Óptica y Acústica In-Situ
+        // Actuación Óptica y Acústica In-Situ
         switch (effectiveRisk) {
-            case 0:
+            case 0: // NORMAL: Solo Verde encendido, silencio
                 digitalWrite(PIN_LED_RED, LOW);
                 digitalWrite(PIN_LED_GREEN, HIGH);
                 digitalWrite(PIN_LED_BLUE, LOW);
-                noTone(PIN_BUZZER);
+                digitalWrite(PIN_BUZZER, LOW); 
                 break;
-            case 1:
+
+            case 1: // ESTRÉS MODERADO: Solo Azul encendido, silencio
                 digitalWrite(PIN_LED_RED, LOW);
                 digitalWrite(PIN_LED_GREEN, LOW);
                 digitalWrite(PIN_LED_BLUE, HIGH);
-                noTone(PIN_BUZZER);
+                digitalWrite(PIN_BUZZER, LOW); 
                 break;
-            case 2:
+
+            case 2: // ALERTA SEVERA: Solo Rojo fijo, beep intermitente a 1200 Hz
                 digitalWrite(PIN_LED_RED, HIGH);
                 digitalWrite(PIN_LED_GREEN, LOW);
                 digitalWrite(PIN_LED_BLUE, LOW);
                 if (!isAlarmSilenced && ((now % 1000) < 150)) {
-                    tone(PIN_BUZZER, 1200);
+                digitalWrite(PIN_BUZZER, HIGH); 
                 } else {
-                    noTone(PIN_BUZZER);
+                digitalWrite(PIN_BUZZER, LOW); 
                 }
                 break;
+
             case 3: {
-                bool strobe = (now / 120) % 2;
+                bool strobe = (now / 150) % 2;
                 digitalWrite(PIN_LED_RED, strobe);
                 digitalWrite(PIN_LED_GREEN, LOW);
                 digitalWrite(PIN_LED_BLUE, !strobe);
                 if (!isAlarmSilenced) {
-                    tone(PIN_BUZZER, 2800);
+                    digitalWrite(PIN_BUZZER, strobe); 
                 } else {
-                    noTone(PIN_BUZZER);
+                    digitalWrite(PIN_BUZZER, LOW); 
                 }
                 break;
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        // Espera 50 ms o despierta de inmediato con xTaskNotifyGive (silenciar / reactivar alarma)
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
 }
 
 // ============================================================================
-// Consola de Servicio CLI Embebida (UART0 @ 115200)
+// Silenciamiento de alarma y cliente MQTT (agua/<nodo_id>/...)
+// ============================================================================
+void queueAck(const char* reqId, const char* source, bool muted) {
+    if (mqttAckQueue == NULL) return;
+    AckMsg m{};
+    strlcpy(m.reqId, reqId ? reqId : "", sizeof(m.reqId));
+    strlcpy(m.source, (source && source[0]) ? source : "local", sizeof(m.source));
+    m.muted = muted;
+    xQueueSend(mqttAckQueue, &m, 0);
+}
+
+// Apaga el pin del buzzer desde el contexto llamador y despierta la tarea HMI.
+bool setAlarmSilence(bool silence, uint32_t sec) {
+    if (silence) digitalWrite(PIN_BUZZER, LOW);
+    bool applied = false;
+    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        isAlarmSilenced = silence;
+        silenceStartMillis = millis();
+        silenceDurationMillis = silence ? sec * 1000UL : 0;
+        xSemaphoreGive(telemetryMutex);
+        applied = true;
+    }
+    if (xHmiTaskHandle != NULL) xTaskNotifyGive(xHmiTaskHandle);
+    return applied;
+}
+
+static bool jsonGetString(const char* json, const char* key, char* out, size_t outLen) {
+    char needle[24];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char* p = strstr(json, needle);
+    if (!p) return false;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ') p++;
+    if (*p != '"') return false;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i < outLen - 1) out[i++] = *p++;
+    out[i] = '\0';
+    return true;
+}
+
+static long jsonGetNumber(const char* json, const char* key, long fallback) {
+    char needle[24];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char* p = strstr(json, needle);
+    if (!p) return fallback;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return fallback;
+    return strtol(p + 1, NULL, 10);
+}
+
+void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
+    (void)topic;
+    char buf[160];
+    size_t n = (length < sizeof(buf) - 1) ? length : sizeof(buf) - 1;
+    memcpy(buf, payload, n);
+    buf[n] = '\0';
+
+    char cmd[24] = {}, reqId[32] = {}, source[12] = {};
+    if (!jsonGetString(buf, "cmd", cmd, sizeof(cmd))) return;
+    jsonGetString(buf, "req_id", reqId, sizeof(reqId));
+    jsonGetString(buf, "source", source, sizeof(source));
+
+    if (strcmp(cmd, "SILENCE_ALARM") == 0) {
+        long dur = jsonGetNumber(buf, "duration_sec", DEFAULT_SILENCE_SEC);
+        if (dur < 1 || dur > 3600) dur = DEFAULT_SILENCE_SEC;
+        bool ok = setAlarmSilence(true, static_cast<uint32_t>(dur));
+        queueAck(reqId, source, ok);
+    } else if (strcmp(cmd, "UNSILENCE_ALARM") == 0) {
+        setAlarmSilence(false, 0);
+        queueAck(reqId, source, false);
+    }
+}
+
+static bool mqttConnectBroker() {
+    const bool hasAuth = MQTT_USERNAME[0] != '\0';
+    if (!mqttClient.connect(mqttClientId,
+                            hasAuth ? MQTT_USERNAME : NULL,
+                            hasAuth ? MQTT_PASSWORD : NULL,
+                            topicEstado, 1, true, "{\"status\":\"offline\"}")) {
+        return false;
+    }
+    mqttClient.subscribe(topicComando, 1);
+    mqttClient.publish(topicEstado, "{\"status\":\"online\"}", true);
+    return true;
+}
+
+void Task_MQTT(void* pvParameters) {
+    (void)pvParameters;
+    mqttClient.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
+    mqttClient.setBufferSize(512);
+    mqttClient.setKeepAlive(15);
+    mqttClient.setSocketTimeout(2);
+    mqttClient.setCallback(mqttOnMessage);
+
+    unsigned long lastTelemetry = 0;
+    unsigned long lastAttempt = 0;
+    int lastAlertRisk = -1;
+    bool lastEchoOk = true;
+
+    for (;;) {
+        if (WiFi.status() != WL_CONNECTED) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (!mqttClient.connected()) {
+            const unsigned long now = millis();
+            if (lastAttempt == 0 || now - lastAttempt >= 3000) {
+                lastAttempt = now;
+                if (mqttConnectBroker()) {
+                    Serial.println("[MQTT] Conectado al broker; LWT y suscripcion a comando activos.");
+                    lastAlertRisk = -1;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        mqttClient.loop();
+
+        AckMsg ack;
+        while (xQueueReceive(mqttAckQueue, &ack, 0) == pdTRUE) {
+            char json[128];
+            snprintf(json, sizeof(json),
+                     "{\"ack\":true,\"ack_confirmed\":true,\"buzzer_muted\":%s,\"req_id\":\"%s\",\"source\":\"%s\"}",
+                     ack.muted ? "true" : "false", ack.reqId, ack.source);
+            mqttClient.publish(topicConfirmacion, json, true);
+        }
+
+        iot::watermonitor::TelemetryRecord rec{};
+        bool silenced = false;
+        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            rec = latestRecord;
+            silenced = isAlarmSilenced;
+            xSemaphoreGive(telemetryMutex);
+        }
+
+        const unsigned long now = millis();
+        if (now - lastTelemetry >= MQTT_TELEMETRY_PERIOD_MS) {
+            lastTelemetry = now;
+            char ts[24] = "";
+            time_t epoch = time(nullptr);
+            if (epoch > 1700000000L) {
+                struct tm g;
+                gmtime_r(&epoch, &g);
+                strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &g);
+            }
+            char json[320];
+            snprintf(json, sizeof(json),
+                "{\"timestamp\":\"%s\",\"level_cm\":%.2f,\"level_pct\":%.1f,\"drop_rate_cm_h\":%.2f,"
+                "\"temp_c\":%.2f,\"humidity_pct\":%.1f,\"pressure_hpa\":%.1f,\"eto_mm_day\":%.2f,"
+                "\"risk_state\":%u,\"alarm_silenced\":%s}",
+                ts, rec.levelCm, rec.levelPercent, rec.dropRateCmH,
+                rec.tempC, rec.humidityPct, rec.pressureHpa, rec.etoMmDay,
+                static_cast<unsigned>(rec.riskState), silenced ? "true" : "false");
+            mqttClient.publish(topicTelemetria, json, false);
+        }
+
+        if (static_cast<int>(rec.riskState) != lastAlertRisk) {
+            char json[96];
+            snprintf(json, sizeof(json), "{\"event\":\"RISK_TRANSITION\",\"risk_state\":%u,\"label\":\"%s\"}",
+                     static_cast<unsigned>(rec.riskState), iot::watermonitor::riskLabel(rec.riskState));
+            if (mqttClient.publish(topicAlerta, json, true)) {
+                lastAlertRisk = static_cast<int>(rec.riskState);
+            }
+        }
+        if (echoSensorOk != lastEchoOk) {
+            mqttClient.publish(topicAlerta,
+                echoSensorOk ? "{\"event\":\"LEVEL_SENSOR_OK\"}" : "{\"event\":\"LEVEL_SENSOR_ERROR\"}", true);
+            lastEchoOk = echoSensorOk;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+// ============================================================================
+// Consola CLI Embebida
 // ============================================================================
 void processCLICommand(char* cmd) {
     while (*cmd == ' ') cmd++;
@@ -1232,10 +1448,13 @@ void processCLICommand(char* cmd) {
         Serial.println("  status          : Telemetria, memoria FreeRTOS y BME280/SD");
         Serial.println("  test <0-3>      : Fuerza estado de riesgo");
         Serial.println("  auto            : Retorna al modo automatico");
-        Serial.println("  silence <seg>   : Silencia buzzer por N segundos");
+        Serial.println("  silence <seg>   : Silencia buzzer por N segundos (ACK < 50 ms)");
         Serial.println("  unsilence       : Reactiva buzzer inmediatamente");
+#if ENABLE_FLOW_SENSOR
         Serial.println("  flow <factor>   : Ajustar factor caudalimetro");
+#endif
         Serial.println("  ntp             : Muestra estado NTP y dia juliano");
+        Serial.println("  mqtt            : Diagnostico de conexion al broker Mosquitto");
         Serial.println("  wifi            : Diagnostico de red (STA / Fallback SoftAP)");
         Serial.println("------------------------------------------------------------");
     }
@@ -1245,8 +1464,12 @@ void processCLICommand(char* cmd) {
             rec = latestRecord;
             xSemaphoreGive(telemetryMutex);
         }
+        float flowVal = 0.0f;
+#if ENABLE_FLOW_SENSOR
+        flowVal = rec.flowLMin;
+#endif
         Serial.printf("\n[STATUS] Nivel: %.1f cm (%.0f%%)  Caudal: %.2f L/min  Desc: %.2f cm/h\n",
-                      rec.levelCm, rec.levelPercent, rec.flowLMin, rec.dropRateCmH);
+                      rec.levelCm, rec.levelPercent, flowVal, rec.dropRateCmH);
         Serial.printf("[STATUS] Temp: %.1f C  Humedad: %.1f%%  Presion: %.0f hPa  ETo: %.2f mm/d\n",
                       rec.tempC, rec.humidityPct, rec.pressureHpa, rec.etoMmDay);
         Serial.printf("[STATUS] Riesgo: %s (%d)  Override: %d  Silenciado: %s\n",
@@ -1275,22 +1498,16 @@ void processCLICommand(char* cmd) {
     else if (strncmp(cmd, "silence ", 8) == 0) {
         uint32_t sec = atoi(cmd + 8);
         if (sec == 0) sec = DEFAULT_SILENCE_SEC;
-        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            isAlarmSilenced = true;
-            silenceStartMillis = millis();
-            silenceDurationMillis = sec * 1000UL;
-            xSemaphoreGive(telemetryMutex);
-        }
+        bool ok = setAlarmSilence(true, sec);
+        queueAck("", "local", ok);
         Serial.printf("[OK] Buzzer silenciado por %lu segundos.\n", (unsigned long)sec);
     }
     else if (strcmp(cmd, "unsilence") == 0) {
-        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            isAlarmSilenced = false;
-            silenceDurationMillis = 0;
-            xSemaphoreGive(telemetryMutex);
-        }
+        setAlarmSilence(false, 0);
+        queueAck("", "local", false);
         Serial.println("[OK] Buzzer reactivado manualmente.");
     }
+#if ENABLE_FLOW_SENSOR
     else if (strncmp(cmd, "flow ", 5) == 0) {
         float f = atof(cmd + 5);
         if (f >= 0.5f && f <= 50.0f) {
@@ -1299,6 +1516,13 @@ void processCLICommand(char* cmd) {
         } else {
             Serial.println("[ERROR] Factor fuera de rango (0.5 a 50.0).");
         }
+    }
+#endif
+    else if (strcmp(cmd, "mqtt") == 0) {
+        Serial.printf("[MQTT] Estado: %s  Broker: %s:%d\n",
+                      mqttClient.connected() ? "CONECTADO" : "DESCONECTADO",
+                      MQTT_BROKER_HOST, MQTT_BROKER_PORT);
+        Serial.printf("[MQTT] Client ID: %s  Topico base: agua/%s/...\n", mqttClientId, MQTT_NODE_ID);
     }
     else if (strcmp(cmd, "ntp") == 0) {
         Serial.printf("[NTP] Sincronizado: %s  Dia Juliano: %d\n",
@@ -1383,10 +1607,11 @@ void setup() {
     Serial.println(" BME280 + ILI9341 + SD + Histeresis + Auth SHA-256 + NTP");
     Serial.println("========================================================");
 
-    // Configuración de Pines GPIO
     pinMode(PIN_TRIG, OUTPUT);
     pinMode(PIN_ECHO, INPUT);
+#if ENABLE_FLOW_SENSOR
     pinMode(PIN_FLOW_HALL, INPUT_PULLUP);
+#endif
     pinMode(PIN_BUZZER, OUTPUT);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
@@ -1397,8 +1622,9 @@ void setup() {
     digitalWrite(PIN_LED_BLUE, LOW);
     noTone(PIN_BUZZER);
 
-    // Interrupción Externa Hall con Spinlock
+#if ENABLE_FLOW_SENSOR
     attachInterrupt(digitalPinToInterrupt(PIN_FLOW_HALL), flowPulseISR, FALLING);
+#endif
 
     pinMode(PIN_TFT_BL, OUTPUT);
     digitalWrite(PIN_TFT_BL, HIGH);
@@ -1407,10 +1633,9 @@ void setup() {
     digitalWrite(PIN_TFT_CS, HIGH);
     digitalWrite(PIN_SD_CS, HIGH);
 
-    // Inicialización de buses
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(100000);
-    Wire.setTimeOut(25);    // Timeout de 25 ms para evitar cuelgues de bus
+    Wire.setTimeOut(25);
     SPI.begin(PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
 
     tft.begin();
@@ -1422,7 +1647,6 @@ void setup() {
     tft.println("MONITOR HIDRICO");
     tft.println("INICIANDO...");
 
-    // Detección BME280
     if (detectAndInitBME280()) {
         Serial.printf("[OK] Sensor BME280 detectado en 0x%02X.\n", bmeAddress);
     } else {
@@ -1443,43 +1667,37 @@ void setup() {
         Serial.println("[WARN] SD no disponible; se conserva SRAM como fuente de tiempo real.");
     }
 
-    // Inicializar LittleFS
-    if (LittleFS.begin(true)) {
-        littleFsMounted = true;
-        Serial.println("[OK] LittleFS montado correctamente.");
-    } else {
-        littleFsMounted = false;
-        Serial.println("[WARN] LittleFS no disponible.");
-    }
-
-    // Computar hash del password al arrancar
     computePasswordHash(AUTH_SALT, "sabana2026", storedPasswordHash);
     Serial.println("[OK] Hash SHA-256 de credenciales calculado.");
 
-    delay(1000);
-    tft.fillScreen(ILI9341_BLACK);
+    delay(500);
 
-    // Red Resiliente: Default STA con Fallback a SoftAP
     initWiFiNetwork();
 
-    // Configurar NTP para día juliano real
     configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
     Serial.println("[OK] NTP configurado (UTC-5 Colombia).");
 
-    // Inicializar ventana térmica 24h
     lastTempResetMillis = millis();
 
-    // Primitivas de sincronización FreeRTOS (Mutex y Cola de Sensores)
     telemetryMutex = xSemaphoreCreateMutex();
     spiMutex = xSemaphoreCreateMutex();
     rawSensorQueue = xQueueCreate(1, sizeof(RawAcquisitionData));
+    mqttAckQueue = xQueueCreate(4, sizeof(AckMsg));
 
-    // Registro base de telemetría
+    snprintf(mqttClientId, sizeof(mqttClientId), "sabana-%s", MQTT_NODE_ID);
+    snprintf(topicTelemetria, sizeof(topicTelemetria), "agua/%s/telemetria", MQTT_NODE_ID);
+    snprintf(topicAlerta, sizeof(topicAlerta), "agua/%s/alerta", MQTT_NODE_ID);
+    snprintf(topicEstado, sizeof(topicEstado), "agua/%s/estado", MQTT_NODE_ID);
+    snprintf(topicComando, sizeof(topicComando), "agua/%s/comando", MQTT_NODE_ID);
+    snprintf(topicConfirmacion, sizeof(topicConfirmacion), "agua/%s/confirmacion", MQTT_NODE_ID);
+
     if (telemetryMutex != NULL) {
         latestRecord.uptimeSec = 0;
         latestRecord.levelCm = iot::watermonitor::TANK_HEIGHT_CM;
         latestRecord.levelPercent = 100.0f;
+#if ENABLE_FLOW_SENSOR
         latestRecord.flowLMin = 0.0f;
+#endif
         latestRecord.dropRateCmH = 0.0f;
         latestRecord.tempC = 20.0f;
         latestRecord.pressureHpa = PRESSURE_UNAVAILABLE_HPA;
@@ -1488,22 +1706,11 @@ void setup() {
         latestRecord.riskState = 0;
     }
 
-    // Lanzamiento de Tareas FreeRTOS en Cores Específicos
-    // Core 0: Red lwIP y Servidor Web HTTP
-    xTaskCreatePinnedToCore(
-        Task_WebServer_HTTP,
-        "WebServerTask",
-        8192,
-        NULL,
-        1,
-        &xWebServerTaskHandle,
-        0 // Core 0
-    );
-
-    // Core 1: Tareas de Borde en Tiempo Real y HMI Local
+    xTaskCreatePinnedToCore(Task_WebServer_HTTP, "WebServerTask", 8192, NULL, 1, &xWebServerTaskHandle, 0);
     xTaskCreatePinnedToCore(Task_EdgeAnalytics, "AnalyticsTask", 4096, NULL, 2, &xAnalyticsTaskHandle, 1);
     xTaskCreatePinnedToCore(Task_SensorAcquisition, "SensorTask", 4096, NULL, 2, &xSensorTaskHandle, 1);
     xTaskCreatePinnedToCore(Task_HMI_Local, "HmiTask", 4096, NULL, 1, &xHmiTaskHandle, 1);
+    xTaskCreatePinnedToCore(Task_MQTT, "MqttTask", 6144, NULL, 1, &xMqttTaskHandle, 1);
 
     Serial.println("[OK] Tareas FreeRTOS creadas en Core 0 y Core 1.");
     Serial.println("[OK] Sistema listo. Escribe 'help' para comandos.");
@@ -1511,7 +1718,7 @@ void setup() {
 }
 
 // ============================================================================
-// LOOP PRINCIPAL (Consola Serial en Core 1)
+// LOOP PRINCIPAL
 // ============================================================================
 void loop() {
     handleSerialCLI();

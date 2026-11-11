@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Secretos del Gateway (Mosquitto, Ubidots, OpenRouter) — Habeas Data
+.env
+gateway/.env
+gateway_rpi/.env
+*.env.local

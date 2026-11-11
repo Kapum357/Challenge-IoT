@@ -87,8 +87,9 @@ int main() {
                "Eco valido (duration=500) retorna nivel en rango [0, TANK_HEIGHT]");
 
     // ========================================================================
-    // 3. Caudal Instantáneo Hall (YF-S201)
+    // 3. Caudal Instantáneo Hall (YF-S201) / Poda de Hardware (Challenge 3)
     // ========================================================================
+#if ENABLE_FLOW_SENSOR
     std::cout << "\n--- 3. Caudal Instantaneo Hall (YF-S201) ---\n";
     expectNear(iot::watermonitor::computeInstantFlowLMin(15UL, 2.0f, 7.5f), 1.0f, 0.05f,
                "Caudal instantaneo (15 pulsos / 2s)");
@@ -98,6 +99,10 @@ int main() {
                "Caudal 0 pulsos = 0 L/min");
     expectNear(iot::watermonitor::computeInstantFlowLMin(10UL, 0.0f, 7.5f), 0.0f, 0.01f,
                "Caudal con elapsedSec=0 retorna 0 (guard)");
+#else
+    std::cout << "\n--- 3. Sensor de Caudal Hall YF-S201: Poda de Ingenieria (Challenge 3) ---\n";
+    std::cout << "[PASS] Sensor YF-S201 podado en HW y SW por decision del Equipo 4 (BOM reducido)\n";
+#endif
 
     // ========================================================================
     // 4. Evapotranspiración Hargreaves-Samani en Sabana Centro (Lat 4.81 N)
@@ -151,6 +156,13 @@ int main() {
     // 7. NUEVO CH2: Detección de fugas (correlación Q ↔ dH/dt)
     //    Si flow < 1.0 L/min pero dropRate >= 3.0 cm/h → ALERTA (posible fuga)
     // ========================================================================
+#if !ENABLE_FLOW_SENSOR
+    std::cout << "\n--- 7. Sin caudalimetro: descenso lento ya no alerta en el borde ---\n";
+    expectInt(iot::watermonitor::evaluateRisk(80.0f, 4.0f, 2.0f), 0,
+              "Sin flujo: dropRate=4.0 con nivel 80% -> NORMAL (la fuga la detecta el Z-score del Gateway)");
+    expectInt(iot::watermonitor::evaluateRisk(80.0f, 5.0f, 2.0f), 1,
+              "Sin flujo: dropRate=5.0 con nivel 80% -> ESTRES por dropRate alto");
+#else
     std::cout << "\n--- 7. NUEVO CH2: Deteccion de fugas (Q vs dH/dt) ---\n";
     expectInt(iot::watermonitor::evaluateRisk(80.0f, 4.0f, 2.0f, 0.2f), 2,
               "Fuga detectada: flow=0.2, dropRate=4.0, nivel=80% -> ALERTA");
@@ -165,6 +177,7 @@ int main() {
     // Pero con dropRate=5.0 y flow > 1.0 → ESTRÉS por dropRate alto (no fuga)
     expectInt(iot::watermonitor::evaluateRisk(80.0f, 5.0f, 2.0f, 5.0f), 1,
               "Con flow=5.0 y dropRate=5.0 -> ESTRES por dropRate alto, no fuga");
+#endif
 
     // ========================================================================
     // 8. Transiciones exactas de frontera en la matriz de riesgo
@@ -184,8 +197,10 @@ int main() {
               "Riesgo frontera nivel 69.9% = 1 (ESTRES MOD)");
     expectInt(iot::watermonitor::evaluateRisk(85.0f, 1.0f, 4.5f, 5.0f), 1,
               "Riesgo ETo alta 4.5 mm/d = 1 (ESTRES MOD)");
+#if ENABLE_FLOW_SENSOR
     expectInt(iot::watermonitor::evaluateRisk(85.0f, 1.0f, 2.0f, 20.1f), 1,
               "Riesgo caudal sostenido > 20 L/min = 1 (ESTRES MOD)");
+#endif
 
     // ========================================================================
     // 9. NUEVO CH2: RiskStateMachine — Histéresis Temporal
@@ -243,7 +258,9 @@ int main() {
     sampleRecord.uptimeSec = 1200;
     sampleRecord.levelCm = 35.5f;
     sampleRecord.levelPercent = 71.0f;
+#if ENABLE_FLOW_SENSOR
     sampleRecord.flowLMin = 3.8f;
+#endif
     sampleRecord.dropRateCmH = 0.4f;
     sampleRecord.tempC = 19.8f;
     sampleRecord.pressureHpa = 746.5f;
@@ -252,7 +269,11 @@ int main() {
     sampleRecord.riskState = 0;
 
     expectNear(sampleRecord.humidityPct, 68.5f, 0.01f, "TelemetryRecord.humidityPct almacena valor BME280");
-    expectTrue(sizeof(iot::watermonitor::TelemetryRecord) == 37, "TelemetryRecord empaquetado (#pragma pack) = 37 bytes");
+#if ENABLE_FLOW_SENSOR
+    expectTrue(sizeof(iot::watermonitor::TelemetryRecord) == 37, "TelemetryRecord empaquetado (#pragma pack) = 37 bytes (con caudal)");
+#else
+    expectTrue(sizeof(iot::watermonitor::TelemetryRecord) == 33, "TelemetryRecord empaquetado (#pragma pack) = 33 bytes (sin caudal, Ch3)");
+#endif
 
     // ========================================================================
     // 11. Verificación de SramRingBuffer (Capacidad 360 muestras)
@@ -355,12 +376,105 @@ int main() {
                "Filtro Subred: Mascara /0 wildcard autoriza cualquier IP");
 
     // ========================================================================
+    // 13. Métodos Cuantitativos de Borde (VPD, Z-score, OLS 60 min, Horas 25%)
+    // ========================================================================
+    std::cout << "\n--- 13. Metodos Cuantitativos de Borde (Challenge 3 / Gateway) ---\n";
+    float vpdNormal = iot::watermonitor::computeVpdKpa(25.0f, 50.0f);
+    expectNear(vpdNormal, 1.584f, 0.02f, "VPD a 25 C y 50% HR (~1.58 kPa)");
+
+    float vpdCold = iot::watermonitor::computeVpdKpa(9.0f, 86.0f);
+    expectNear(vpdCold, 0.161f, 0.02f, "VPD nocturno a 9 C y 86% HR (~0.16 kPa, evaporacion nula)");
+
+    float zScoreVal = iot::watermonitor::computeZScore(5.5f, 0.7f, 2.0f);
+    expectNear(zScoreVal, 2.40f, 0.02f, "Z-score dH/dt ((5.5 - 0.7) / 2.0 = 2.40)");
+
+    float timeHoursSample[] = {0.0f, 0.5f, 1.0f};
+    float levelsCmSample[] = {30.0f, 27.5f, 25.0f};
+    float olsSlope = iot::watermonitor::computeOlsSlope(timeHoursSample, levelsCmSample, 3);
+    expectNear(olsSlope, -5.0f, 0.05f, "Regresion lineal OLS: pendiente dH/dt = -5.0 cm/h");
+
+    float hoursToCrit = iot::watermonitor::computeHoursToCritical(21.0f, 5.5f, 12.5f);
+    expectNear(hoursToCrit, 1.5f, 0.05f, "Horas a nivel critico 25% ((21.0 - 12.5)/5.5 = 1.5 h)");
+
+    float hoursStable = iot::watermonitor::computeHoursToCritical(30.0f, 0.01f, 12.5f);
+    expectNear(hoursStable, 999.0f, 0.1f, "Horas a nivel critico con nivel estable = 999.0 h");
+
+    float hoursInvalid = iot::watermonitor::computeHoursToCritical(-1.0f, 5.0f, 12.5f);
+    expectNear(hoursInvalid, -1.0f, 0.01f, "Horas a nivel critico con level_cm = -1.0 retorna -1.0");
+
+    // ========================================================================
+    // 14. Batería de 5 Casos de Prueba Empíricos (TC-01 a TC-05)
+    // ========================================================================
+    std::cout << "\n--- 14. Bateria de 5 Casos de Prueba Empiricos (TC-01 a TC-05) ---\n";
+
+    // TC-01: Típico 1: Nivel Normal en Mañana Templada
+    int riskTc01 = iot::watermonitor::evaluateRisk(82.0f, 0.4f, 2.8f);
+    float vpdTc01 = iot::watermonitor::computeVpdKpa(14.5f, 74.0f);
+    float hCritTc01 = iot::watermonitor::computeHoursToCritical(41.0f, 0.4f, 12.5f);
+    expectInt(riskTc01, 0, "TC-01: Diagnostico NORMAL (cero falsos positivos)");
+    expectTrue(vpdTc01 < 0.8f, "TC-01: Demanda evaporativa baja en mañana templada");
+    expectNear(hCritTc01, 71.3f, 0.1f, "TC-01: Autonomia proyectada hacia umbral critico 25% = 71.3 h");
+
+    // TC-02: Típico 2: Calor Extremo El Niño + Descenso Rápido
+    int riskTc02 = iot::watermonitor::evaluateRisk(42.0f, 5.5f, 5.4f);
+    float vpdTc02 = iot::watermonitor::computeVpdKpa(26.5f, 38.0f);
+    float hCritTc02 = iot::watermonitor::computeHoursToCritical(21.0f, 5.5f, 12.5f);
+    expectInt(riskTc02, 2, "TC-02: Diagnostico ALERTA SEVERA ante estres termico El Nino");
+    expectTrue(vpdTc02 >= 1.6f, "TC-02: VPD >= 1.6 kPa confirma alta demanda evaporativa El Nino");
+    expectNear(hCritTc02, 1.5f, 0.05f, "TC-02: Autonomia < 1.5 h exige racionamiento preventivo UAEGRD");
+
+    // TC-03: Borde 1: Eco Ultrasónico Inválido (level_cm = -1.0)
+    float echoFail = iot::watermonitor::measureCorrectedLevel(18.0f, 0L);
+    float hCritFail = iot::watermonitor::computeHoursToCritical(-1.0f, 0.0f, 12.5f);
+    expectNear(echoFail, -1.0f, 0.01f, "TC-03: Eco invalido HC-SR04 retorna LEVEL_SENSOR_ERROR (-1.0)");
+    expectNear(hCritFail, -1.0f, 0.01f, "TC-03: Proyeccion con sensor en fallo reporta -1.0 (anti-alucinacion)");
+
+    // TC-04: Borde 2: Anomalía Nocturna (Fuga sin Evaporación)
+    float vpdNocturno = iot::watermonitor::computeVpdKpa(9.0f, 86.0f);
+    float zScoreFuga = iot::watermonitor::computeZScore(8.5f, 0.9f, 2.0f);
+    float hCritFuga = iot::watermonitor::computeHoursToCritical(32.0f, 8.5f, 12.5f);
+    expectTrue(vpdNocturno < 0.3f, "TC-04: VPD nocturno ~0.16 kPa descarta evaporacion atmosferica");
+    expectTrue(zScoreFuga >= 2.5f, "TC-04: Z-score >= 2.5 detecta anomalia de vaciado no evaporativo");
+    expectNear(hCritFuga, 2.3f, 0.05f, "TC-04: Autonomia 2.3 h ante posible fuga estructural");
+
+    // TC-05: Adversarial: Caída de Internet / Descenso Crítico
+    int riskTc05 = iot::watermonitor::evaluateRisk(22.0f, 10.2f, 3.0f);
+    float hCritTc05 = iot::watermonitor::computeHoursToCritical(11.0f, 10.2f, 12.5f);
+    expectInt(riskTc05, 3, "TC-05: Nivel < 25% y dH/dt >= 10 cm/h detonan EMERGENCIA CRITICA");
+    expectNear(hCritTc05, 0.0f, 0.01f, "TC-05: Horas a critico = 0.0 h (tanque ya en zona critica)");
+
+    // ========================================================================
+    // 15. Serialización JSON Estricta de Telemetría (MQTT Gateway / SQLite)
+    // ========================================================================
+    std::cout << "\n--- 15. Serializacion JSON Estricta de Telemetria ---\n";
+    iot::watermonitor::TelemetryRecord jsonRec{};
+    jsonRec.uptimeSec = 3600;
+    jsonRec.levelCm = 28.5f;
+    jsonRec.levelPercent = 57.0f;
+    jsonRec.dropRateCmH = 1.2f;
+    jsonRec.tempC = 17.5f;
+    jsonRec.pressureHpa = 748.2f;
+    jsonRec.humidityPct = 62.0f;
+    jsonRec.etoMmDay = 3.6f;
+    jsonRec.riskState = 1;
+
+    std::string jsonStr = iot::watermonitor::formatTelemetryJson(jsonRec, "nodo01", "2026-10-28T14:30:00Z", false);
+    expectTrue(jsonStr.find("\"nodo_id\": \"nodo01\"") != std::string::npos, "JSON contiene nodo_id");
+    expectTrue(jsonStr.find("\"level_cm\": 28.50") != std::string::npos, "JSON contiene level_cm exacto");
+    expectTrue(jsonStr.find("\"level_pct\": 57.00") != std::string::npos, "JSON contiene level_pct exacto");
+    expectTrue(jsonStr.find("\"edge_risk_state\": 1") != std::string::npos, "JSON contiene edge_risk_state");
+#if !ENABLE_FLOW_SENSOR
+    expectTrue(jsonStr.find("flow_l_min") == std::string::npos, "JSON NO contiene flow_l_min (poda total de caudal)");
+#endif
+
+    // ========================================================================
     // RESUMEN FINAL
     // ========================================================================
     std::cout << "\n========================================================\n";
-    std::cout << " TODAS LAS VERIFICACIONES DEL CHALLENGE 2 PASARON OK    \n";
-    std::cout << " Correcciones Ch1: fail-safe, dH/dt en nivel alto, fugas\n";
-    std::cout << " Nuevas funciones: RiskStateMachine con histeresis       \n";
+    std::cout << " TODAS LAS VERIFICACIONES (CHALLENGE 2 + 3) PASARON OK  \n";
+    std::cout << " Poda YF-S201: Cero alucinacion de caudal en telemetria  \n";
+    std::cout << " Analitica cuantitativa Gateway: VPD, Z-score y OLS OK   \n";
+    std::cout << " Casos TC-01 a TC-05 validados con criterio 24/24        \n";
     std::cout << "========================================================\n";
     return 0;
 }

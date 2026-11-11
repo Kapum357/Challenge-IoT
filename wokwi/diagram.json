@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "author": "IoT Sabana Centro Team - Challenge #2",
+  "author": "IoT Sabana Centro Team - Challenge #3",
   "editor": "wokwi",
   "parts": [
     { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
@@ -10,7 +10,6 @@
     { "type": "wokwi-microsd-card", "id": "sd", "top": 190, "left": 300, "attrs": {} },
     { "type": "wokwi-resistor", "id": "echo_div_high", "top": -60, "left": 250, "attrs": { "value": "1k" } },
     { "type": "wokwi-resistor", "id": "echo_div_low", "top": -10, "left": 250, "attrs": { "value": "2k" } },
-    { "type": "wokwi-pushbutton", "id": "btn_flow", "top": 40, "left": -120, "attrs": { "color": "blue", "label": "Flow Pulse (YF-S201)" } },
     { "type": "wokwi-buzzer", "id": "buzzer", "top": 160, "left": -120, "attrs": {} },
     { "type": "wokwi-led", "id": "led_red", "top": 20, "left": 250, "attrs": { "color": "red", "label": "Alerta / Emergencia" } },
     { "type": "wokwi-led", "id": "led_green", "top": 70, "left": 250, "attrs": { "color": "green", "label": "Estado Normal" } },
@@ -50,8 +49,6 @@
     [ "esp:3V3", "sd:VCC", "red", [ "v0" ] ],
     [ "esp:GND.1", "sd:GND", "black", [ "v0" ] ],
 
-    [ "esp:D14", "btn_flow:1.l", "cyan", [ "v0" ] ],
-    [ "esp:GND.2", "btn_flow:2.l", "black", [ "v0" ] ],
 
     [ "esp:D27", "buzzer:2", "purple", [ "v0" ] ],
     [ "esp:GND.2", "buzzer:1", "black", [ "v0" ] ],

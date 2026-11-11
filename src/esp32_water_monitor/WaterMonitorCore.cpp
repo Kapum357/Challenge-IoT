@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 
 namespace iot {
 namespace watermonitor {
@@ -167,6 +169,7 @@ float calculateHargreavesETo(int dayOfYear, float tMinC, float tMaxC) {
     return 0.0023f * 0.408f * ra * (tMean + 17.8f) * std::sqrt(tMaxC - tMinC);
 }
 
+#if ENABLE_FLOW_SENSOR
 float computeInstantFlowLMin(unsigned long pulseCount, float elapsedSeconds, float flowFactor) {
     if (elapsedSeconds <= 0.0f || flowFactor <= 0.0f) {
         return 0.0f;
@@ -175,30 +178,28 @@ float computeInstantFlowLMin(unsigned long pulseCount, float elapsedSeconds, flo
     const float pulsesPerSecond = static_cast<float>(pulseCount) / elapsedSeconds;
     return pulsesPerSecond / flowFactor;
 }
+#endif
 
 /**
- * CORRECCIÓN Ch2: Matriz de fusión mejorada.
- *
- * Cambios respecto a Ch1:
- * 1. El estado "NORMAL" (nivel >= 70%) AHORA VERIFICA dH/dt.
- *    Si dropRate >= 10 cm/h con nivel alto → ALERTA (2).
- *    Si dropRate >= 5 cm/h con nivel alto → ESTRÉS (1).
- *
- * 2. Detección de fugas: si flowLMin < 1.0 (casi sin salida medida)
- *    pero dropRate >= 3.0 (nivel bajando rápidamente) → ALERTA (2).
- *    Esto indica pérdida de agua no explicada por caudal de salida.
+ * Matriz de fusión multisensorial de borde.
+ * En Challenge #3 (ENABLE_FLOW_SENSOR == 0), no se evalúa caudal físico,
+ * el diagnóstico se basa en nivel acústico compensado, dH/dt y ETo.
  */
 int evaluateRisk(float levelPercent, float dropRateCmPerHour, float etoMmDay, float flowLMin) {
+#if !ENABLE_FLOW_SENSOR
+    (void)flowLMin;
+#endif
     // 3: Emergencia Crítica (Vaciado severo o nivel < 25%)
     if (levelPercent < 25.0f || dropRateCmPerHour >= 10.0f) {
         return 3;
     }
 
-    // Detección de fugas: bajo caudal de salida + descenso anómalo de nivel
-    // Indica pérdida de agua no explicada por el flujo medido (fisura, fuga en tubería, etc.)
+#if ENABLE_FLOW_SENSOR
+    // Detección de fugas con caudalímetro: bajo caudal de salida + descenso anómalo
     if (flowLMin < 1.0f && dropRateCmPerHour >= 3.0f) {
         return 2; // ALERTA — posible fuga
     }
+#endif
 
     // 2: Alerta Severa (Nivel 25-50% o caída rápida con alta evaporación)
     if ((levelPercent >= 25.0f && levelPercent < 50.0f) ||
@@ -207,18 +208,25 @@ int evaluateRisk(float levelPercent, float dropRateCmPerHour, float etoMmDay, fl
     }
 
     // 1: Estrés Moderado (Nivel 50-70% o alta ETo o alto caudal sostenido)
-    if ((levelPercent >= 50.0f && levelPercent < 70.0f) || etoMmDay >= 4.5f || flowLMin > 20.0f) {
+    if ((levelPercent >= 50.0f && levelPercent < 70.0f) || etoMmDay >= 4.5f
+#if ENABLE_FLOW_SENSOR
+        || flowLMin > 20.0f
+#endif
+    ) {
         return 1;
     }
 
-    // CORRECCIÓN Ch2: Nivel >= 70% (zona "normal") PERO con descenso rápido
-    // Bug del Ch1: esta verificación no existía, retornaba 0 directamente
+    // Nivel >= 70% (zona normal) PERO con descenso rápido
     if (dropRateCmPerHour >= 5.0f) {
         return 1; // ESTRÉS — descenso significativo aun con nivel alto
     }
 
     // 0: Operación Normal (nivel >= 70%, sin anomalías)
     return 0;
+}
+
+int evaluateRisk(float levelPercent, float dropRateCmPerHour, float etoMmDay) {
+    return evaluateRisk(levelPercent, dropRateCmPerHour, etoMmDay, 0.0f);
 }
 
 const char* riskLabel(int riskState) {
@@ -234,6 +242,87 @@ const char* riskLabel(int riskState) {
         default:
             return "DESCONOCIDO";
     }
+}
+
+// ============================================================================
+// Implementación de Analítica Cuantitativa Compartida Gateway & ESP32
+// ============================================================================
+float computeVpdKpa(float tempC, float rhPct) {
+    if (tempC < -40.0f || rhPct < 0.0f) {
+        return -1.0f;
+    }
+    const float boundedRh = std::max(0.0f, std::min(100.0f, rhPct));
+    const float es = 0.61078f * std::exp((17.27f * tempC) / (tempC + 237.3f));
+    const float ea = es * (boundedRh / 100.0f);
+    return std::round((es - ea) * 1000.0f) / 1000.0f;
+}
+
+float computeZScore(float currentDrop, float meanDrop, float stdDrop) {
+    const float effectiveStd = (stdDrop > 1e-6f) ? stdDrop : 0.5f;
+    return std::round(((currentDrop - meanDrop) / effectiveStd) * 100.0f) / 100.0f;
+}
+
+float computeOlsSlope(const float* timeHours, const float* levelsCm, size_t count) {
+    if (!timeHours || !levelsCm || count < 2) {
+        return 0.0f;
+    }
+    float xSum = 0.0f;
+    float ySum = 0.0f;
+    for (size_t i = 0; i < count; ++i) {
+        xSum += timeHours[i];
+        ySum += levelsCm[i];
+    }
+    const float xMean = xSum / static_cast<float>(count);
+    const float yMean = ySum / static_cast<float>(count);
+    float num = 0.0f;
+    float den = 0.0f;
+    for (size_t i = 0; i < count; ++i) {
+        const float xDiff = timeHours[i] - xMean;
+        num += xDiff * (levelsCm[i] - yMean);
+        den += xDiff * xDiff;
+    }
+    if (den <= 1e-6f) {
+        return 0.0f;
+    }
+    return std::round((num / den) * 1000.0f) / 1000.0f;
+}
+
+float computeHoursToCritical(float currentLevelCm, float effectiveDescentRateCmH, float criticalLevelCm) {
+    if (currentLevelCm < 0.0f) {
+        return -1.0f;
+    }
+    if (currentLevelCm <= criticalLevelCm) {
+        return 0.0f;
+    }
+    if (effectiveDescentRateCmH > 0.05f) {
+        return std::round(((currentLevelCm - criticalLevelCm) / effectiveDescentRateCmH) * 10.0f) / 10.0f;
+    }
+    return 999.0f;
+}
+
+std::string formatTelemetryJson(const TelemetryRecord& record,
+                                const char* nodoId,
+                                const char* timestampUtc,
+                                bool alarmSilenced) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    ss << "{\n";
+    ss << "  \"nodo_id\": \"" << (nodoId ? nodoId : "nodo01") << "\",\n";
+    ss << "  \"timestamp_utc\": \"" << (timestampUtc ? timestampUtc : "2026-10-28T12:00:00Z") << "\",\n";
+    ss << "  \"level_cm\": " << record.levelCm << ",\n";
+    ss << "  \"level_pct\": " << record.levelPercent << ",\n";
+#if ENABLE_FLOW_SENSOR
+    ss << "  \"flow_l_min\": " << record.flowLMin << ",\n";
+#endif
+    ss << "  \"drop_rate_cm_h\": " << record.dropRateCmH << ",\n";
+    ss << "  \"temp_c\": " << record.tempC << ",\n";
+    ss << "  \"humidity_pct\": " << record.humidityPct << ",\n";
+    ss << "  \"pressure_hpa\": " << record.pressureHpa << ",\n";
+    ss << "  \"eto_mm_day\": " << record.etoMmDay << ",\n";
+    ss << "  \"edge_risk_state\": " << static_cast<int>(record.riskState) << ",\n";
+    ss << "  \"alarm_silenced_ack\": " << (alarmSilenced ? "true" : "false") << "\n";
+    ss << "}";
+    return ss.str();
 }
 
 } // namespace watermonitor
