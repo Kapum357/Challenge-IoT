@@ -73,3 +73,7 @@ Testing/
 gateway/.env
 gateway_rpi/.env
 *.env.local
+
+# Makefiles propios del proyecto (no son generados por CMake)
+!gateway/Makefile
+!src/Makefile
