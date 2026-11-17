@@ -56,8 +56,8 @@ constexpr int DAYLIGHT_OFFSET_SEC = 0;
 const char* NTP_SERVER = "pool.ntp.org";
 
 // Configuración de Red: Default STA con Fallback Dinámico a SoftAP
-const char* WIFI_STA_SSID = "Kapum A52";
-const char* WIFI_STA_PASS = "Ivanna<3";
+const char* WIFI_STA_SSID = "tefi";
+const char* WIFI_STA_PASS = "555yippie";
 const char* WIFI_AP_SSID  = "AguaSabana-Nodo";
 const char* WIFI_AP_PASS  = "sabana2026";
 constexpr unsigned long WIFI_STA_TIMEOUT_MS = 10000;        // 10s ventana estricta de arranque
@@ -68,16 +68,16 @@ constexpr unsigned long WIFI_STA_TIMEOUT_MS = 10000;        // 10s ventana estri
 #define MQTT_NODE_ID "nodo01"
 #endif
 #ifndef MQTT_BROKER_HOST
-#define MQTT_BROKER_HOST "192.168.25.1"
+#define MQTT_BROKER_HOST "10.128.13.58"
 #endif
 #ifndef MQTT_BROKER_PORT
 #define MQTT_BROKER_PORT 1883
 #endif
 #ifndef MQTT_USERNAME
-#define MQTT_USERNAME ""
+#define MQTT_USERNAME "nodo01"
 #endif
 #ifndef MQTT_PASSWORD
-#define MQTT_PASSWORD ""
+#define MQTT_PASSWORD "sabana2026"
 #endif
 constexpr unsigned long MQTT_TELEMETRY_PERIOD_MS = 5000;   // Publicacion a Mosquitto cada 5 s
 constexpr unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000; // 15s intervalo de reintento en Core 0

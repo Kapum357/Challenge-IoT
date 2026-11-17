@@ -3,7 +3,7 @@
 ---
 
 ## 🌊 Visión del Proyecto
-Nodo IoT de procesamiento en el borde (*Edge Computing*) concebido como una solución de ultra bajo costo (**BOM optimizado de $20.50 USD en Challenge #3**, donde el ESP32 a **$4.50 USD** representa el **21.95%** del BOM y se preserva rigurosamente como el componente individual más costoso del sistema) para la detección temprana de riesgo hídrico, sequía y balance hidrometeorológico en reservorios y acueductos veredales de la provincia de Sabana Centro, Cundinamarca (Latitud 4.81° N, 2,600 m.s.n.m.), en el marco de la crisis climática por el Fenómeno de El Niño.
+Nodo IoT de procesamiento en el borde (*Edge Computing*) concebido como una solución de ultra bajo costo (**BOM optimizado de $22.00 USD en Challenge #3**, donde el ESP32 a **$4.50 USD** representa el **20.45%** del BOM y se preserva rigurosamente como el componente individual más costoso del sistema) para la detección temprana de riesgo hídrico, sequía y balance hidrometeorológico en reservorios y acueductos veredales de la provincia de Sabana Centro, Cundinamarca (Latitud 4.81° N, 2,600 m.s.n.m.), en el marco de la crisis climática por el Fenómeno de El Niño.
 
 El sistema opera con **100% de autonomía in-situ (cero costos mensuales de conectividad o infraestructura cloud)** mediante una **arquitectura concurrente dual-core sobre FreeRTOS** y un **Gateway IoT en Raspberry Pi 100% en C++17**:
 1. **Compensación termo-acústica dinámica**: Corrección del tiempo de vuelo ultrasónico (HC-SR04) en función de la temperatura ambiental leída por el sensor **BME280** vía I2C. Modo *fail-safe* que emite centinela de error en eco inválido en lugar de asumir tanque lleno. El BME280 proporciona además medición barométrica real (hPa) y humedad relativa (% HR).
@@ -28,7 +28,7 @@ El sistema opera con **100% de autonomía in-situ (cero costos mensuales de cone
 * `wokwi/`:
   * `diagram.json`: Configuración del circuito en simulador Wokwi (ESP32 DevKit v1, HC-SR04, BME280 I2C, ILI9341 SPI, microSD, LEDs, Buzzer y Pulsador Hall).
   * `wokwi.toml`: Configuración de enlace a binarios de firmware.
-* `Challenge.wiki/`: Documentación técnica formal completa con Registros de Decisiones de Arquitectura (ADR), Business Model Canvas, diagramas UML y normas IEEE.
+* `Challenge-IoT.wiki/`: Documentación técnica formal completa con Registros de Decisiones de Arquitectura (ADR), Business Model Canvas, diagramas UML y normas IEEE.
 
 ---
 
@@ -38,7 +38,7 @@ El sistema opera con **100% de autonomía in-situ (cero costos mensuales de cone
 Para compilar y ejecutar la suite completa de pruebas unitarias en Windows/Linux (81 aserciones en 12 bloques temáticos):
 ```powershell
 cd src
-mingw32-make run
+make test
 ```
 *O mediante compilación directa con g++:*
 ```powershell
@@ -89,10 +89,10 @@ Comandos implementados en el monitor serie (`SabanaNode>`):
 
 ## 📊 Lista Maestra de Materiales (BOM) y Mapeo de Pines
 
-### Bill of Materials (BOM) Optimizado — Total: $20.50 USD (Challenge #3)
+### Bill of Materials (BOM) Optimizado — Total: $22.00 USD (Challenge #3)
 | Componente | Modelo / Especificación | Función en el Sistema | Costo Unitario |
 | :--- | :--- | :--- | :--- |
-| **ESP32-WROOM-32 DevKit v1** | Dual Core Xtensa LX6 @ 240 MHz | **Unidad Central y Componente Más Costoso** | **$4.50 USD** (21.95% BOM) |
+| **ESP32-WROOM-32 DevKit v1** | Dual Core Xtensa LX6 @ 240 MHz | **Unidad Central y Componente Más Costoso** | **$4.50 USD** (20.45% BOM) |
 | **Sensor de Caudal Hall** | YF-S201 (Rotor de turbina) | *Podado en Ch3 por feedback de diseño* | **$0.00 USD** (Ch3) / $3.50 (Ch2) |
 | **Sensor Termo-Higro-Barométrico** | **BME280 I2C (0x76/0x77)** | **Temperatura, Humedad Relativa y Presión Barométrica** | **$2.80 USD** |
 | **Display TFT** | **ILI9341 SPI, 240x320, RGB565, sin táctil** | Interfaz HMI local autónoma in-situ | **$6.00 USD** |
@@ -101,9 +101,9 @@ Comandos implementados en el monitor serie (`SabanaNode>`):
 | **Gabinete de Paso** | Caja PVC/ABS estanca IP65 | Envolvente protectora para intemperie | **$2.00 USD** |
 | **Alarma Acústica + Óptica** | Buzzer activo 85 dB + 3 LEDs | Alerta sonora y semáforo cromático de riesgo | **$1.80 USD** |
 | **Acondicionamiento Pasivo** | Resistencias pull-up y divisores | Adaptación de niveles 5V a 3.3V | **$0.70 USD** |
-| **TOTAL BOM** | — | **Costo Integral del Nodo de Borde** | **$20.50 USD** |
+| **TOTAL BOM** | — | **Costo Integral del Nodo de Borde** | **$22.00 USD** |
 
-*Nota de Cumplimiento*: El microcontrolador ESP32 DevKit v1 ($4.50 USD) se conserva con el 21.95% del presupuesto como el componente individual de mayor valor en el BOM.
+*Nota de Cumplimiento*: El microcontrolador ESP32 DevKit v1 ($4.50 USD) se conserva con el 20.45% del presupuesto como el componente individual de mayor valor en el BOM.
 
 ### Tabla Maestra de Asignación de Pines GPIO
 | Dispositivo | Pin Dispositivo | Pin ESP32 | Tipo de Señal | Nivel Lógico | Notas de Acondicionamiento |
@@ -123,7 +123,7 @@ Comandos implementados en el monitor serie (`SabanaNode>`):
 ## 🤖 Challenge #3: Módulo de IA Hidroclimática en Gateway IoT (Raspberry Pi — 100% C++17)
 
 ### Arquitectura Unificada y Ventajas Industriales
-El Gateway IoT opera sobre Raspberry Pi OS en **100% C++17 nativo** (`Challenge/gateway/`):
+El Gateway IoT opera sobre Raspberry Pi OS en **100% C++17 nativo** (`Challenge-IoT/gateway/`):
 - **Reutilización Binaria Total**: `WaterMonitorCore.cpp` se enlaza directamente en el binario `sabana_gateway`, compartiendo idénticos cálculos astronómicos, térmicos y de histéresis.
 - **Persistencia en SQLite Local**: Motor embebido en modo WAL (`telemetry` e `ia_recommendations`).
 - **Analítica Cuantitativa Local**: Regresión lineal OLS sobre 60 minutos (`computeOlsSlope`) y puntaje $Z$ histórico (`computeZScore`).
@@ -136,17 +136,17 @@ El Gateway IoT opera sobre Raspberry Pi OS en **100% C++17 nativo** (`Challenge/
 #### 1. En Raspberry Pi OS (Gateway C++17)
 ```bash
 sudo apt update && sudo apt install -y g++ libmosquitto-dev libsqlite3-dev libcurl4-openssl-dev nlohmann-json3-dev
-cd Challenge/gateway
+cd Challenge-IoT/gateway
 make
 ./sabana_gateway
 ```
 
 #### 2. Pruebas Unitarias Unificadas (C++17)
 ```bash
-cd Challenge/src
+cd Challenge-IoT/src
 # Pruebas Challenge #3 (Sensor de caudal podado, TC-01 a TC-05)
-mingw32-make clean; mingw32-make test
+make clean; make test
 
 # Pruebas Challenge #2 (Retrocompatibilidad con sensor de caudal habilitado)
-mingw32-make clean; mingw32-make test-flow
+make clean; make test-flow
 ```
