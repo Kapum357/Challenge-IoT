@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <SD.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
@@ -18,7 +17,7 @@
 // Sabana Centro, Cundinamarca - Latitud: 4.81° N (2,600 m.s.n.m.)
 // Challenge #2: Arquitectura Concurrente Dual-Core FreeRTOS (Core 0 / Core 1)
 //   + WebServer (Core 0) + Autenticación SHA-256 + NTP + Histéresis
-// Hardware: ESP32 DevKit v1 + HC-SR04 + BME280 + ILI9341 SPI + SD + Buzzer + LEDs
+// Hardware: ESP32 DevKit v1 + HC-SR04 + BME280 + ILI9341 SPI + Buzzer + LEDs
 // ============================================================================
 
 // Mapeo de Pines de Hardware
@@ -38,13 +37,11 @@
 #define PIN_TFT_DC      16
 #define PIN_TFT_RST     17
 #define PIN_TFT_BL      32
-#define PIN_SD_CS       13
 
 // Constantes de Muestreo y Bus
 constexpr int I2C_SDA_PIN = 21;
 constexpr int I2C_SCL_PIN = 22;
 constexpr unsigned long SAMPLE_PERIOD_MS = 2000;
-constexpr unsigned long HISTORY_PERSIST_MS = 900000; // Persistir cada 15 min
 constexpr uint32_t DEFAULT_SILENCE_SEC = 300;
 constexpr float PRESSURE_UNAVAILABLE_HPA = -1.0f;
 
@@ -139,7 +136,6 @@ bool bmeAvailable = false;
 uint8_t bmeAddress = 0x76;
 bool ntpSynced = false;
 bool echoSensorOk = true;
-bool sdMounted = false;
 
 // Perro Guardián de Silenciamiento Remoto
 bool isAlarmSilenced = false;
@@ -292,31 +288,6 @@ bool detectAndInitBME280() {
         else { bmeAvailable = false; }
     }
     return bmeAvailable;
-}
-
-void appendTelemetryToSd(const iot::watermonitor::TelemetryRecord& record) {
-    if (!sdMounted || spiMutex == NULL ||
-        xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return;
-    }
-
-    File file = SD.open("/telemetry.csv", FILE_APPEND);
-    if (!file) {
-        Serial.println("[WARN] No se pudo abrir /telemetry.csv en SD.");
-        xSemaphoreGive(spiMutex);
-        return;
-    }
-    float flowVal = 0.0f;
-#if ENABLE_FLOW_SENSOR
-    flowVal = record.flowLMin;
-#endif
-    file.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u\n",
-                static_cast<unsigned long>(record.uptimeSec),
-                record.levelCm, record.levelPercent, flowVal,
-                record.dropRateCmH, record.tempC, record.pressureHpa,
-                record.humidityPct, record.etoMmDay, record.riskState);
-    file.close();
-    xSemaphoreGive(spiMutex);
 }
 
 float readAcousticLevel(float ambientTempC, float previousLevelCm) {
@@ -552,7 +523,6 @@ select{background:#1e293b;color:#fff;border:1px solid var(--b);padding:4px 8px;b
     <div style="display:flex;justify-content:space-between;font-size:.75rem;padding-top:4px;flex-wrap:wrap;gap:6px">
       <span>BME280: <b id="hw-bme">--</b></span>
       <span>Eco US: <b id="hw-echo">--</b></span>
-      <span>MicroSD: <b id="hw-sd">--</b></span>
       <span>RAM: <b id="hw-ram">--</b></span>
       <span>WiFi: <b id="hw-rssi">--</b></span>
     </div>
@@ -621,8 +591,6 @@ function upd(){
         $('hw-bme').style.color=bmeOk?'var(--green)':'var(--red)';
         $('hw-echo').textContent=d.hw.echo?'OK':'SIN ECO';
         $('hw-echo').style.color=d.hw.echo?'var(--green)':'var(--red)';
-        $('hw-sd').textContent=d.hw.sd?'MONTADA':'N/A';
-        $('hw-sd').style.color=d.hw.sd?'var(--green)':'var(--yellow)';
         $('hw-ram').textContent=d.hw.heap_kb+' KB';
         const w=$('hw-rssi');
         if(d.hw.wifi_sta){w.textContent='STA ('+d.hw.rssi+' dBm)';w.style.color='var(--green)';}
@@ -830,7 +798,7 @@ void handleApiData() {
         "\"risk_state\":%d,\"risk_label\":\"%s\",\"override\":%d,"
         "\"silenced\":%s,\"silence_s\":%lu,\"uptime_s\":%lu,"
         "\"ntp_synced\":%s,\"hysteresis_state\":%d,"
-        "\"hw\":{\"sht\":%s,\"echo\":%s,\"sd\":%s,\"heap_kb\":%u,\"rssi\":%d,\"wifi_sta\":%s,\"ap_fallback\":%s}}",
+        "\"hw\":{\"sht\":%s,\"echo\":%s,\"heap_kb\":%u,\"rssi\":%d,\"wifi_sta\":%s,\"ap_fallback\":%s}}",
         rec.levelCm, rec.levelPercent, rec.dropRateCmH,
         rec.tempC, rec.pressureHpa, rec.humidityPct, rec.etoMmDay,
         effectiveRisk, iot::watermonitor::riskLabel(effectiveRisk),
@@ -840,7 +808,6 @@ void handleApiData() {
         (ntpSynced ? "true" : "false"), hystState,
         (bmeAvailable ? "true" : "false"),
         (echoSensorOk ? "true" : "false"),
-        (sdMounted ? "true" : "false"),
         (unsigned int)freeHeapKb, rssi,
         (staConnected ? "true" : "false"),
         (apFallbackActive ? "true" : "false")
@@ -1013,7 +980,6 @@ void Task_EdgeAnalytics(void* pvParameters) {
     (void)pvParameters;
     float previousWaterLevel = iot::watermonitor::TANK_HEIGHT_CM;
     bool isFirstAnalyticsRun = true;
-    unsigned long lastSdPersist = 0;
 
     for (;;) {
         RawAcquisitionData data;
@@ -1061,12 +1027,6 @@ void Task_EdgeAnalytics(void* pvParameters) {
             latestRecord = rec;
             sramRingBuffer.push(rec);
             xSemaphoreGive(telemetryMutex);
-        }
-
-        unsigned long now = millis();
-        if (lastSdPersist == 0 || now - lastSdPersist >= HISTORY_PERSIST_MS) {
-            appendTelemetryToSd(rec);
-            lastSdPersist = now;
         }
     }
 }
@@ -1150,7 +1110,7 @@ void renderTftStatusPage(int effectiveRisk, const iot::watermonitor::TelemetryRe
     // 4. Barra Inferior de Diagnósticos (Tamaño 1)
     tft.setTextSize(1);
     tft.setCursor(8, 270);
-    tft.printf("BME280: %-3s  SD: %-3s            ", (bmeAvailable ? "OK" : "N/A"), (sdMounted ? "OK" : "N/A"));
+    tft.printf("BME280: %-3s  Buffer: %3u/360     ", (bmeAvailable ? "OK" : "N/A"), (unsigned int)sramRingBuffer.size());
     
     tft.setCursor(8, 285);
     if (rec.pressureHpa < 0.0f) {
@@ -1445,7 +1405,7 @@ void processCLICommand(char* cmd) {
         Serial.println("  CONSOLA DE SERVICIO - NODO IOT SABANA CENTRO (CH2)        ");
         Serial.println("------------------------------------------------------------");
         Serial.println("  help            : Muestra este menu de comandos");
-        Serial.println("  status          : Telemetria, memoria FreeRTOS y BME280/SD");
+        Serial.println("  status          : Telemetria, memoria FreeRTOS y BME280");
         Serial.println("  test <0-3>      : Fuerza estado de riesgo");
         Serial.println("  auto            : Retorna al modo automatico");
         Serial.println("  silence <seg>   : Silencia buzzer por N segundos (ACK < 50 ms)");
@@ -1475,10 +1435,9 @@ void processCLICommand(char* cmd) {
         Serial.printf("[STATUS] Riesgo: %s (%d)  Override: %d  Silenciado: %s\n",
                       iot::watermonitor::riskLabel(rec.riskState), rec.riskState,
                       manualRiskOverride, isAlarmSilenced ? "SI" : "NO");
-        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  BME280: %s (0x%02X)  SD: %s\n",
+        Serial.printf("[STATUS] Buffer historico: %d/%d  Uptime: %lu s  BME280: %s (0x%02X)\n",
                       (int)sramRingBuffer.size(), (int)sramRingBuffer.capacity(),
-                      rec.uptimeSec, bmeAvailable ? "OK" : "N/A", bmeAddress,
-                      sdMounted ? "OK" : "N/A");
+                      rec.uptimeSec, bmeAvailable ? "OK" : "N/A", bmeAddress);
         Serial.printf("[STATUS] Heap libre: %d bytes  NTP: %s  Dia: %d\n",
                       ESP.getFreeHeap(), ntpSynced ? "Sincronizado" : "Fallback", getDayOfYear());
     }
@@ -1604,7 +1563,7 @@ void setup() {
     Serial.println("\n========================================================");
     Serial.println(" NODO IOT SABANA CENTRO - CHALLENGE #2                  ");
     Serial.println(" Arquitectura Dual-Core FreeRTOS + WebServer (Core 0)  ");
-    Serial.println(" BME280 + ILI9341 + SD + Histeresis + Auth SHA-256 + NTP");
+    Serial.println(" BME280 + ILI9341 + Histeresis + Auth SHA-256 + NTP    ");
     Serial.println("========================================================");
 
     pinMode(PIN_TRIG, OUTPUT);
@@ -1629,9 +1588,7 @@ void setup() {
     pinMode(PIN_TFT_BL, OUTPUT);
     digitalWrite(PIN_TFT_BL, HIGH);
     pinMode(PIN_TFT_CS, OUTPUT);
-    pinMode(PIN_SD_CS, OUTPUT);
     digitalWrite(PIN_TFT_CS, HIGH);
-    digitalWrite(PIN_SD_CS, HIGH);
 
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(100000);
@@ -1653,19 +1610,7 @@ void setup() {
         Serial.println("[WARN] BME280 no detectado. Valores de respaldo.");
     }
 
-    if (SD.begin(PIN_SD_CS, SPI)) {
-        sdMounted = true;
-        if (!SD.exists("/telemetry.csv")) {
-            File file = SD.open("/telemetry.csv", FILE_WRITE);
-            if (file) {
-                file.println("uptime_s,level_cm,level_pct,flow_l_min,drop_cm_h,temp_c,pressure_hpa,humidity_pct,eto_mm_day,risk");
-                file.close();
-            }
-        }
-        Serial.println("[OK] SD montada; persistencia CSV habilitada.");
-    } else {
-        Serial.println("[WARN] SD no disponible; se conserva SRAM como fuente de tiempo real.");
-    }
+    Serial.println("[OK] Buffer circular en SRAM (360 muestras) habilitado como fuente de tiempo real.");
 
     computePasswordHash(AUTH_SALT, "sabana2026", storedPasswordHash);
     Serial.println("[OK] Hash SHA-256 de credenciales calculado.");

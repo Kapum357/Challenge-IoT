@@ -41,9 +41,6 @@ namespace iot
             const char *OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
             const std::vector<std::string> OPENROUTER_FREE_MODELS = {
-                "google/gemini-2.0-flash-exp:free",
-                "meta-llama/llama-3.3-70b-instruct:free",
-                "qwen/qwen-2.5-72b-instruct:free",
                 "openrouter/free"};
 
             const char *SYSTEM_PROMPT_TEXT = R"RAW([ROL]

@@ -7,7 +7,6 @@
     { "type": "wokwi-hc-sr04", "id": "ultrasonic", "top": -140, "left": 170, "attrs": { "mode": "1", "accel": "1440" } },
     { "type": "wokwi-ili9341", "id": "tft", "top": 190, "left": 80, "attrs": {} },
     { "type": "chip-bme280", "id": "bme", "top": -120, "left": -120, "attrs": {} },
-    { "type": "wokwi-microsd-card", "id": "sd", "top": 190, "left": 300, "attrs": {} },
     { "type": "wokwi-resistor", "id": "echo_div_high", "top": -60, "left": 250, "attrs": { "value": "1k" } },
     { "type": "wokwi-resistor", "id": "echo_div_low", "top": -10, "left": 250, "attrs": { "value": "2k" } },
     { "type": "wokwi-buzzer", "id": "buzzer", "top": 160, "left": -120, "attrs": {} },
@@ -41,14 +40,6 @@
     [ "esp:3V3", "tft:VCC", "red", [ "v0" ] ],
     [ "esp:GND.1", "tft:GND", "black", [ "v0" ] ],
     [ "esp:D32", "tft:LED", "red", [ "v0" ] ],
-
-    [ "esp:D18", "sd:SCK", "yellow", [ "v0" ] ],
-    [ "esp:D19", "sd:DO", "green", [ "v0" ] ],
-    [ "esp:D23", "sd:DI", "orange", [ "v0" ] ],
-    [ "esp:D13", "sd:CS", "purple", [ "v0" ] ],
-    [ "esp:3V3", "sd:VCC", "red", [ "v0" ] ],
-    [ "esp:GND.1", "sd:GND", "black", [ "v0" ] ],
-
 
     [ "esp:D27", "buzzer:2", "purple", [ "v0" ] ],
     [ "esp:GND.2", "buzzer:1", "black", [ "v0" ] ],
